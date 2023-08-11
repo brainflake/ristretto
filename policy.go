@@ -17,23 +17,31 @@
 package ristretto
 
 import (
+	"io"
 	"math"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
 	"github.com/dgraph-io/ristretto/z"
+	"github.com/golang/glog"
+	msgpack "github.com/vmihailenco/msgpack/v5"
 )
 
 const (
 	// lfuSample is the number of items to sample when looking at eviction
 	// candidates. 5 seems to be the most optimal number [citation needed].
 	lfuSample = 5
+
+	admissionLFUFilename = "admission_policy.lfu"
+	evictionLFUFilename  = "eviction_policy.lfu"
 )
 
 // policy is the interface encapsulating eviction/admission behavior.
 //
 // TODO: remove this interface and just rename defaultPolicy to policy, as we
-//       are probably only going to use/implement/maintain one policy.
+//
+//	are probably only going to use/implement/maintain one policy.
 type policy interface {
 	ringConsumer
 	// Add attempts to Add the key-cost pair to the Policy. It returns a slice
@@ -60,6 +68,8 @@ type policy interface {
 	MaxCost() int64
 	// UpdateMaxCost updates the max cost of the cache policy.
 	UpdateMaxCost(int64)
+	// Snapshot will generate a snapshot of the LFU structures
+	Snapshot(string) error
 }
 
 func newPolicy(numCounters, maxCost int64) policy {
@@ -85,6 +95,35 @@ func newDefaultPolicy(numCounters, maxCost int64) *defaultPolicy {
 	}
 	go p.processItems()
 	return p
+}
+
+// Snapshot generates a snapshot of the policy and stores it in path
+func (p *defaultPolicy) Snapshot(dir string) error {
+	var err error
+
+	admissionPolicyBuffer, err := z.NewBufferPersistent(filepath.Join(dir, admissionLFUFilename), 0)
+	if err != nil {
+		return err
+	}
+	defer admissionPolicyBuffer.Release()
+
+	err = p.admit.MarshalToBuffer(admissionPolicyBuffer)
+	if err != nil {
+		return err
+	}
+
+	evictionPolicyBuffer, err := z.NewBufferPersistent(filepath.Join(dir, evictionLFUFilename), 0)
+	if err != nil {
+		return err
+	}
+	defer evictionPolicyBuffer.Release()
+
+	err = p.evict.MarshalToBuffer(evictionPolicyBuffer)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (p *defaultPolicy) CollectMetrics(metrics *Metrics) {
@@ -277,6 +316,12 @@ func (p *defaultPolicy) UpdateMaxCost(maxCost int64) {
 	p.evict.updateMaxCost(maxCost)
 }
 
+type sampledLFUExport struct {
+	MaxCost  int64
+	Used     int64
+	KeyCosts map[uint64]int64
+}
+
 // sampledLFU is an eviction helper storing key-cost pairs.
 type sampledLFU struct {
 	// NOTE: align maxCost to 64-bit boundary for use with atomic.
@@ -295,6 +340,33 @@ func newSampledLFU(maxCost int64) *sampledLFU {
 	return &sampledLFU{
 		keyCosts: make(map[uint64]int64),
 		maxCost:  maxCost,
+	}
+}
+
+func (p *sampledLFU) MarshalToBuffer(buffer io.Writer) error {
+	export := sampledLFUExport{
+		MaxCost:  p.maxCost,
+		Used:     p.used,
+		KeyCosts: p.keyCosts,
+	}
+
+	e := msgpack.NewEncoder(buffer)
+
+	return e.Encode(export)
+}
+
+func UnmarshalSampledLFU(b []byte) *sampledLFU {
+	sLFU := &sampledLFUExport{}
+
+	err := msgpack.Unmarshal(b, sLFU)
+	if err != nil {
+		glog.Fatal("msgpack.Unmarshal failed: ", err)
+	}
+
+	return &sampledLFU{
+		maxCost:  sLFU.MaxCost,
+		used:     sLFU.Used,
+		keyCosts: sLFU.KeyCosts,
 	}
 }
 
@@ -363,6 +435,13 @@ func (p *sampledLFU) clear() {
 	p.keyCosts = make(map[uint64]int64)
 }
 
+type tinyLFUExport struct {
+	Freq    *cmSketchExport
+	Door    *z.BloomExport
+	Incrs   int64
+	ResetAt int64
+}
+
 // tinyLFU is an admission helper that keeps track of access frequency using
 // tiny (4-bit) counters in the form of a count-min sketch.
 // tinyLFU is NOT thread safe.
@@ -378,6 +457,40 @@ func newTinyLFU(numCounters int64) *tinyLFU {
 		freq:    newCmSketch(numCounters),
 		door:    z.NewBloomFilter(float64(numCounters), 0.01),
 		resetAt: numCounters,
+	}
+}
+
+func (p *tinyLFU) MarshalToBuffer(buffer io.Writer) error {
+	export := tinyLFUExport{
+		Freq:    NewCmSketchExport(p.freq),
+		Door:    z.NewBloomExport(p.door),
+		Incrs:   p.incrs,
+		ResetAt: p.resetAt,
+	}
+
+	e := msgpack.NewEncoder(buffer)
+	err := e.Encode(export)
+
+	if err != nil {
+		glog.Fatal("msgpack.Encode failed: ", err)
+	}
+
+	return err
+}
+
+func UnmarshalTinyLFU(b []byte) *tinyLFU {
+	tLFU := &tinyLFUExport{}
+
+	err := msgpack.Unmarshal(b, tLFU)
+	if err != nil {
+		glog.Fatal("msgpack.Unmarshal failed: ", err)
+	}
+
+	return &tinyLFU{
+		freq:    tLFU.Freq.ToCmSketch(),
+		door:    tLFU.Door.ToBloom(),
+		incrs:   tLFU.Incrs,
+		resetAt: tLFU.ResetAt,
 	}
 }
 

@@ -17,16 +17,31 @@
 package ristretto
 
 import (
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/dgraph-io/ristretto/z"
+	"github.com/golang/glog"
+	msgpack "github.com/vmihailenco/msgpack/v5"
+)
+
+const (
+	shardFilenameTemplate = "shard_%d.map"
+	expirationMapFilename = "expirations.map"
 )
 
 // TODO: Do we need this to be a separate struct from Item?
 type storeItem struct {
-	key        uint64
-	conflict   uint64
-	value      interface{}
-	expiration time.Time
+	Key        uint64
+	Conflict   uint64
+	Value      interface{}
+	Expiration time.Time
 }
 
 // store is the interface fulfilled by all hash map implementations in this
@@ -53,6 +68,8 @@ type store interface {
 	Cleanup(policy policy, onEvict itemCallback)
 	// Clear clears all contents of the store.
 	Clear(onEvict itemCallback)
+	// Snapshot will create a point-in-time snapshot of the cache
+	Snapshot(path string) error
 }
 
 // newStore returns the default store implementation.
@@ -67,6 +84,10 @@ type shardedMap struct {
 	expiryMap *expirationMap
 }
 
+type sharedMapSnapshot struct {
+	offsets []uint64
+}
+
 func newShardedMap() *shardedMap {
 	sm := &shardedMap{
 		shards:    make([]*lockedMap, int(numShards)),
@@ -76,6 +97,47 @@ func newShardedMap() *shardedMap {
 		sm.shards[i] = newLockedMap(sm.expiryMap)
 	}
 	return sm
+}
+
+func UnmarshalExpirationMap(b []byte) *expirationMap {
+	var em expirationMap
+
+	err := msgpack.Unmarshal(b, &em)
+	if err != nil {
+		glog.Fatal("json.Unmarshal failed: ", err)
+	}
+
+	return &em
+}
+
+func newShardedMapFromSnapshot(path string) (*shardedMap, error) {
+	sm := &shardedMap{
+		shards: make([]*lockedMap, int(numShards)),
+	}
+
+	file, err := os.OpenFile(filepath.Join(path, "expiryMap"), os.O_RDONLY, 0666)
+	defer file.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	var buffer bytes.Buffer
+	buffer.ReadFrom(file)
+
+	sm.expiryMap = UnmarshalExpirationMap(buffer.Bytes())
+
+	for i := range sm.shards {
+		file, err := os.OpenFile(filepath.Join(path, strconv.Itoa(i)), os.O_RDONLY, 0666)
+		defer file.Close()
+
+		if err != nil {
+			return nil, err
+		}
+
+		sm.shards[i] = newLockedMapFromSnapshot(sm.expiryMap, file)
+	}
+
+	return sm, nil
 }
 
 func (sm *shardedMap) Get(key, conflict uint64) (interface{}, bool) {
@@ -113,6 +175,49 @@ func (sm *shardedMap) Clear(onEvict itemCallback) {
 	}
 }
 
+func (sm *shardedMap) Snapshot(dir string) error {
+	var err error
+
+	var expiryBuffer *z.Buffer
+	expiryBuffer, err = z.NewBufferPersistent(filepath.Join(dir, expirationMapFilename), 0)
+	if err != nil {
+		return err
+	}
+	defer expiryBuffer.Release()
+
+	e := msgpack.NewEncoder(expiryBuffer)
+
+	err = e.Encode(sm.expiryMap)
+	if err != nil {
+		return err
+	}
+
+	// Note these are done serially here so as not to read lock all of the shards at once, although this may
+	// not be a concern
+	for idx, data := range sm.shards {
+		var dataBuffer *z.Buffer
+
+		dataBuffer, err = z.NewBufferPersistent(filepath.Join(dir, fmt.Sprintf(shardFilenameTemplate, idx)), 0)
+		if err != nil {
+			return err
+		}
+
+		err = data.marshalToBuffer(dataBuffer)
+		dataBuffer.Release() // ensure we release the buffer regardless of error status
+		if err != nil {
+			// fail if there's a single error
+			return err
+		}
+	}
+
+	return nil
+}
+
+type exportedLockedMap struct {
+	Data map[uint64]storeItem
+	Em   *expirationMap
+}
+
 type lockedMap struct {
 	sync.RWMutex
 	data map[uint64]storeItem
@@ -126,6 +231,58 @@ func newLockedMap(em *expirationMap) *lockedMap {
 	}
 }
 
+func newLockedMapFromSnapshot(em *expirationMap, reader io.Reader) *lockedMap {
+	var lockedMapBuffer bytes.Buffer
+	_, err := lockedMapBuffer.ReadFrom(reader)
+	if err != nil {
+		// add message here
+		return &lockedMap{
+			data: make(map[uint64]storeItem),
+			em:   em,
+		}
+	}
+
+	lockedMap := UnmarshalLockedMap(lockedMapBuffer.Bytes())
+	lockedMap.em = em
+
+	return lockedMap
+}
+
+func (m *lockedMap) marshalToBuffer(buffer io.Writer) error {
+	m.RLock()
+	defer m.RUnlock()
+
+	e := msgpack.NewEncoder(buffer)
+
+	//exportedMap := &exportedLockedMap{
+	//	Data: m.data,
+	//	Em:   m.em,
+	//}
+	err := e.Encode(m.data)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func UnmarshalLockedMap(b []byte) *lockedMap {
+	lockedMap := &lockedMap{}
+
+	data := make(map[uint64]storeItem)
+
+	if len(b) > 1 {
+		err := msgpack.Unmarshal(b, &data)
+		if err != nil {
+			glog.Fatal("msgpack.Unmarshal failed: ", err)
+		}
+	}
+
+	lockedMap.data = data
+
+	return lockedMap
+}
+
 func (m *lockedMap) get(key, conflict uint64) (interface{}, bool) {
 	m.RLock()
 	item, ok := m.data[key]
@@ -133,21 +290,21 @@ func (m *lockedMap) get(key, conflict uint64) (interface{}, bool) {
 	if !ok {
 		return nil, false
 	}
-	if conflict != 0 && (conflict != item.conflict) {
+	if conflict != 0 && (conflict != item.Conflict) {
 		return nil, false
 	}
 
 	// Handle expired items.
-	if !item.expiration.IsZero() && time.Now().After(item.expiration) {
+	if !item.Expiration.IsZero() && time.Now().After(item.Expiration) {
 		return nil, false
 	}
-	return item.value, true
+	return item.Value, true
 }
 
 func (m *lockedMap) Expiration(key uint64) time.Time {
 	m.RLock()
 	defer m.RUnlock()
-	return m.data[key].expiration
+	return m.data[key].Expiration
 }
 
 func (m *lockedMap) Set(i *Item) {
@@ -163,10 +320,10 @@ func (m *lockedMap) Set(i *Item) {
 	if ok {
 		// The item existed already. We need to check the conflict key and reject the
 		// update if they do not match. Only after that the expiration map is updated.
-		if i.Conflict != 0 && (i.Conflict != item.conflict) {
+		if i.Conflict != 0 && (i.Conflict != item.Conflict) {
 			return
 		}
-		m.em.update(i.Key, i.Conflict, item.expiration, i.Expiration)
+		m.em.update(i.Key, i.Conflict, item.Expiration, i.Expiration)
 	} else {
 		// The value is not in the map already. There's no need to return anything.
 		// Simply add the expiration map.
@@ -174,10 +331,10 @@ func (m *lockedMap) Set(i *Item) {
 	}
 
 	m.data[i.Key] = storeItem{
-		key:        i.Key,
-		conflict:   i.Conflict,
-		value:      i.Value,
-		expiration: i.Expiration,
+		Key:        i.Key,
+		Conflict:   i.Conflict,
+		Value:      i.Value,
+		Expiration: i.Expiration,
 	}
 }
 
@@ -188,18 +345,18 @@ func (m *lockedMap) Del(key, conflict uint64) (uint64, interface{}) {
 		m.Unlock()
 		return 0, nil
 	}
-	if conflict != 0 && (conflict != item.conflict) {
+	if conflict != 0 && (conflict != item.Conflict) {
 		m.Unlock()
 		return 0, nil
 	}
 
-	if !item.expiration.IsZero() {
-		m.em.del(key, item.expiration)
+	if !item.Expiration.IsZero() {
+		m.em.del(key, item.Expiration)
 	}
 
 	delete(m.data, key)
 	m.Unlock()
-	return item.conflict, item.value
+	return item.Conflict, item.Value
 }
 
 func (m *lockedMap) Update(newItem *Item) (interface{}, bool) {
@@ -209,21 +366,21 @@ func (m *lockedMap) Update(newItem *Item) (interface{}, bool) {
 		m.Unlock()
 		return nil, false
 	}
-	if newItem.Conflict != 0 && (newItem.Conflict != item.conflict) {
+	if newItem.Conflict != 0 && (newItem.Conflict != item.Conflict) {
 		m.Unlock()
 		return nil, false
 	}
 
-	m.em.update(newItem.Key, newItem.Conflict, item.expiration, newItem.Expiration)
+	m.em.update(newItem.Key, newItem.Conflict, item.Expiration, newItem.Expiration)
 	m.data[newItem.Key] = storeItem{
-		key:        newItem.Key,
-		conflict:   newItem.Conflict,
-		value:      newItem.Value,
-		expiration: newItem.Expiration,
+		Key:        newItem.Key,
+		Conflict:   newItem.Conflict,
+		Value:      newItem.Value,
+		Expiration: newItem.Expiration,
 	}
 
 	m.Unlock()
-	return item.value, true
+	return item.Value, true
 }
 
 func (m *lockedMap) Clear(onEvict itemCallback) {
@@ -231,9 +388,9 @@ func (m *lockedMap) Clear(onEvict itemCallback) {
 	i := &Item{}
 	if onEvict != nil {
 		for _, si := range m.data {
-			i.Key = si.key
-			i.Conflict = si.conflict
-			i.Value = si.value
+			i.Key = si.Key
+			i.Conflict = si.Conflict
+			i.Value = si.Value
 			onEvict(i)
 		}
 	}
