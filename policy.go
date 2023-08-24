@@ -23,7 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/brainflake/ristretto/z"
 	"github.com/golang/glog"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 )

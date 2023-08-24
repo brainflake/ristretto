@@ -2,11 +2,8 @@ module github.com/brainflake/ristretto
 
 go 1.12
 
-replace github.com/dgraph-io/ristretto => github.com/brainflake/ristretto v0.1.3
-
 require (
 	github.com/cespare/xxhash/v2 v2.1.1
-	github.com/dgraph-io/ristretto v0.1.1
 	github.com/dgryski/go-farm v0.0.0-20190423205320-6a90982ecee2
 	github.com/dustin/go-humanize v1.0.0
 	github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b
