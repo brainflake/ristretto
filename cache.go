@@ -236,6 +236,66 @@ func (c *Cache) Snapshot(dir string) error {
 	return c.store.Snapshot(dir)
 }
 
+func NewCacheFromSnapshot(dir string, config *Config) (*Cache, error) {
+	var err error
+	var dirInfo os.FileInfo
+
+	// check that dir exists and is writable
+	if dirInfo, err = os.Stat(dir); os.IsNotExist(err) {
+		// path doesn't exist - we should try to create it here
+		return nil, err
+	}
+	if !dirInfo.IsDir() {
+		return nil, errors.New("snapshot path is not a directory")
+	}
+
+	switch {
+	case config.BufferItems == 0:
+		return nil, errors.New("BufferItems can't be zero")
+	}
+	policy, err := newDefaultPolicyFromSnapshot(dir)
+	store, err := newStoreFromSnapshot(dir)
+	cache := &Cache{
+		store:              store,
+		policy:             policy,
+		getBuf:             newRingBuffer(policy, config.BufferItems),
+		setBuf:             make(chan *Item, setBufSize),
+		keyToHash:          config.KeyToHash,
+		stop:               make(chan struct{}),
+		cost:               config.Cost,
+		ignoreInternalCost: config.IgnoreInternalCost,
+		cleanupTicker:      time.NewTicker(time.Duration(bucketDurationSecs) * time.Second / 2),
+	}
+	cache.onExit = func(val interface{}) {
+		if config.OnExit != nil && val != nil {
+			config.OnExit(val)
+		}
+	}
+	cache.onEvict = func(item *Item) {
+		if config.OnEvict != nil {
+			config.OnEvict(item)
+		}
+		cache.onExit(item.Value)
+	}
+	cache.onReject = func(item *Item) {
+		if config.OnReject != nil {
+			config.OnReject(item)
+		}
+		cache.onExit(item.Value)
+	}
+	if cache.keyToHash == nil {
+		cache.keyToHash = z.KeyToHash
+	}
+	if config.Metrics {
+		cache.collectMetrics()
+	}
+	// NOTE: benchmarks seem to show that performance decreases the more
+	//       goroutines we have running cache.processItems(), so 1 should
+	//       usually be sufficient
+	go cache.processItems()
+	return cache, nil
+}
+
 // Wait blocks until all buffered writes have been applied. This ensures a call to Set()
 // will be visible to future calls to Get().
 func (c *Cache) Wait() {

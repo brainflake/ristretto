@@ -77,6 +77,11 @@ func newStore() store {
 	return newShardedMap()
 }
 
+// newStoreFromSnapshot returns a new store from a stored snapshot
+func newStoreFromSnapshot(dir string) (store, error) {
+	return newShardedMapFromSnapshot(dir)
+}
+
 const numShards uint64 = 256
 
 type shardedMap struct {

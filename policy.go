@@ -19,6 +19,7 @@ package ristretto
 import (
 	"io"
 	"math"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -74,6 +75,40 @@ type policy interface {
 
 func newPolicy(numCounters, maxCost int64) policy {
 	return newDefaultPolicy(numCounters, maxCost)
+}
+
+func newDefaultPolicyFromSnapshot(dir string) (policy, error) {
+	var err error
+
+	admissionPolicyFile := filepath.Join(dir, admissionLFUFilename)
+	if _, err = os.Stat(admissionPolicyFile); os.IsNotExist(err) {
+		return nil, err
+	}
+
+	evictionPolicyFile := filepath.Join(dir, evictionLFUFilename)
+	if _, err = os.Stat(evictionPolicyFile); os.IsNotExist(err) {
+		return nil, err
+	}
+
+	admit, err := newTinyLFUFromSnapshot(admissionPolicyFile)
+	if err != nil {
+		return nil, err
+	}
+
+	evict, err := newSampledLFUFromSnapshot(evictionPolicyFile)
+	if err != nil {
+		return nil, err
+	}
+
+	p := &defaultPolicy{
+		admit:   admit,
+		evict:   evict,
+		itemsCh: make(chan []uint64, 3),
+		stop:    make(chan struct{}),
+	}
+
+	go p.processItems()
+	return p, nil
 }
 
 type defaultPolicy struct {
@@ -343,6 +378,26 @@ func newSampledLFU(maxCost int64) *sampledLFU {
 	}
 }
 
+func newSampledLFUFromSnapshot(file string) (*sampledLFU, error) {
+	var err error
+
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	mmapFile, err := z.OpenMmapFileUsing(f, int(stat.Size()), false)
+
+	sLFU := UnmarshalSampledLFU(mmapFile.Data)
+
+	return sLFU, err
+}
+
 func (p *sampledLFU) MarshalToBuffer(buffer io.Writer) error {
 	export := sampledLFUExport{
 		MaxCost:  p.maxCost,
@@ -458,6 +513,26 @@ func newTinyLFU(numCounters int64) *tinyLFU {
 		door:    z.NewBloomFilter(float64(numCounters), 0.01),
 		resetAt: numCounters,
 	}
+}
+
+func newTinyLFUFromSnapshot(file string) (*tinyLFU, error) {
+	var err error
+
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	mmapFile, err := z.OpenMmapFileUsing(f, int(stat.Size()), false)
+
+	tLFU := UnmarshalTinyLFU(mmapFile.Data)
+
+	return tLFU, nil
 }
 
 func (p *tinyLFU) MarshalToBuffer(buffer io.Writer) error {
