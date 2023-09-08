@@ -142,16 +142,19 @@ func (p *defaultPolicy) Snapshot(dir string) error {
 	}
 	defer admissionPolicyBuffer.Release()
 
-	err = p.admit.MarshalToBuffer(admissionPolicyBuffer)
-	if err != nil {
-		return err
-	}
-
 	evictionPolicyBuffer, err := z.NewBufferPersistent(filepath.Join(dir, evictionLFUFilename), 0)
 	if err != nil {
 		return err
 	}
 	defer evictionPolicyBuffer.Release()
+
+	p.Lock()
+	defer p.Unlock()
+
+	err = p.admit.MarshalToBuffer(admissionPolicyBuffer)
+	if err != nil {
+		return err
+	}
 
 	err = p.evict.MarshalToBuffer(evictionPolicyBuffer)
 	if err != nil {
