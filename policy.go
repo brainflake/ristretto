@@ -394,9 +394,12 @@ func newSampledLFUFromSnapshot(file string) (*sampledLFU, error) {
 		return nil, err
 	}
 
-	mmapFile, err := z.OpenMmapFileUsing(f, int(stat.Size()), false)
+	buf, err := z.NewReadBuffer(f, int(stat.Size()))
+	if err != nil {
+		return nil, err
+	}
 
-	sLFU := UnmarshalSampledLFU(mmapFile.Data)
+	sLFU := UnmarshalSampledLFU(buf.Bytes())
 
 	return sLFU, err
 }
@@ -531,9 +534,12 @@ func newTinyLFUFromSnapshot(file string) (*tinyLFU, error) {
 		return nil, err
 	}
 
-	mmapFile, err := z.OpenMmapFileUsing(f, int(stat.Size()), false)
+	buf, err := z.NewReadBuffer(f, int(stat.Size()))
+	if err != nil {
+		return nil, err
+	}
 
-	tLFU := UnmarshalTinyLFU(mmapFile.Data)
+	tLFU := UnmarshalTinyLFU(buf.Bytes())
 
 	return tLFU, nil
 }
