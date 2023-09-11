@@ -120,7 +120,7 @@ func newShardedMapFromSnapshot(path string) (*shardedMap, error) {
 		shards: make([]*lockedMap, int(numShards)),
 	}
 
-	file, err := os.OpenFile(filepath.Join(path, "expiryMap"), os.O_RDONLY, 0666)
+	file, err := os.OpenFile(filepath.Join(path, expirationMapFilename), os.O_RDONLY, 0666)
 	defer file.Close()
 	if err != nil {
 		return nil, err
