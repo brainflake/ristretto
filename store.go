@@ -17,7 +17,6 @@
 package ristretto
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -109,7 +108,7 @@ func UnmarshalExpirationMap(b []byte) *expirationMap {
 
 	err := msgpack.Unmarshal(b, &em)
 	if err != nil {
-		glog.Fatal("json.Unmarshal failed: ", err)
+		glog.Fatal("msgpack.Unmarshal failed: ", err)
 	}
 
 	return &em
@@ -126,8 +125,12 @@ func newShardedMapFromSnapshot(path string) (*shardedMap, error) {
 		return nil, err
 	}
 
-	var buffer bytes.Buffer
-	buffer.ReadFrom(file)
+	stat, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	buffer, err := z.NewReadBuffer(file, int(stat.Size()))
 
 	sm.expiryMap = UnmarshalExpirationMap(buffer.Bytes())
 
@@ -139,7 +142,17 @@ func newShardedMapFromSnapshot(path string) (*shardedMap, error) {
 			return nil, err
 		}
 
-		sm.shards[i] = newLockedMapFromSnapshot(sm.expiryMap, file)
+		stat, err := file.Stat()
+		if err != nil {
+			return nil, err
+		}
+
+		buffer, err := z.NewReadBuffer(file, int(stat.Size()))
+		if err != nil {
+			return nil, err
+		}
+
+		sm.shards[i] = newLockedMapFromSnapshot(sm.expiryMap, buffer.Bytes())
 	}
 
 	return sm, nil
@@ -236,18 +249,8 @@ func newLockedMap(em *expirationMap) *lockedMap {
 	}
 }
 
-func newLockedMapFromSnapshot(em *expirationMap, reader io.Reader) *lockedMap {
-	var lockedMapBuffer bytes.Buffer
-	_, err := lockedMapBuffer.ReadFrom(reader)
-	if err != nil {
-		// add message here
-		return &lockedMap{
-			data: make(map[uint64]storeItem),
-			em:   em,
-		}
-	}
-
-	lockedMap := UnmarshalLockedMap(lockedMapBuffer.Bytes())
+func newLockedMapFromSnapshot(em *expirationMap, buf []byte) *lockedMap {
+	lockedMap := UnmarshalLockedMap(buf)
 	lockedMap.em = em
 
 	return lockedMap

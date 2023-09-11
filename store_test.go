@@ -115,7 +115,7 @@ func TestStoreSnapshot(t *testing.T) {
 	//	//require.NotEqual(t, 0, len(w))
 	//}
 
-	readers := make([]io.Reader, numShards)
+	readers := make([]*bytes.Buffer, numShards)
 	for idx := range readers {
 		buffer, ok := writers[idx].(*bytes.Buffer)
 		require.True(t, ok)
@@ -141,7 +141,7 @@ func TestStoreSnapshot(t *testing.T) {
 		//lockedMap := UnmarshalLockedMap(lockedMapBuffer.Bytes())
 		//t.Log(lockedMap)
 
-		s2.shards[idx] = newLockedMapFromSnapshot(s2.expiryMap, readers[idx])
+		s2.shards[idx] = newLockedMapFromSnapshot(s2.expiryMap, readers[idx].Bytes())
 	}
 
 	for idx, m := range s2.shards {
