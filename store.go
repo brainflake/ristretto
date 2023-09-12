@@ -21,7 +21,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"time"
 
@@ -135,7 +134,8 @@ func newShardedMapFromSnapshot(path string) (*shardedMap, error) {
 	sm.expiryMap = UnmarshalExpirationMap(buffer.Bytes())
 
 	for i := range sm.shards {
-		file, err := os.OpenFile(filepath.Join(path, strconv.Itoa(i)), os.O_RDONLY, 0666)
+		shardFile := fmt.Sprintf("shard_%d.map", i)
+		file, err := os.OpenFile(filepath.Join(path, shardFile), os.O_RDONLY, 0666)
 		defer file.Close()
 
 		if err != nil {
