@@ -253,8 +253,17 @@ func NewCacheFromSnapshot(dir string, config *Config) (*Cache, error) {
 	case config.BufferItems == 0:
 		return nil, errors.New("BufferItems can't be zero")
 	}
+
 	policy, err := newDefaultPolicyFromSnapshot(dir)
+	if err != nil {
+		return nil, err
+	}
+
 	store, err := newStoreFromSnapshot(dir)
+	if err != nil {
+		return nil, err
+	}
+
 	cache := &Cache{
 		store:              store,
 		policy:             policy,
