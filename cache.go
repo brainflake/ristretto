@@ -236,7 +236,7 @@ func (c *Cache) Snapshot(dir string) error {
 	return c.store.Snapshot(dir)
 }
 
-func NewCacheFromSnapshot(dir string, config *Config) (*Cache, error) {
+func NewCacheFromSnapshot(dir string, config *Config, itemType interface{}) (*Cache, error) {
 	var err error
 	var dirInfo os.FileInfo
 
@@ -259,7 +259,7 @@ func NewCacheFromSnapshot(dir string, config *Config) (*Cache, error) {
 		return nil, err
 	}
 
-	store, err := newStoreFromSnapshot(dir)
+	store, err := newStoreFromSnapshot(dir, itemType)
 	if err != nil {
 		return nil, err
 	}

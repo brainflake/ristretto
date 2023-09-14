@@ -17,10 +17,12 @@
 package ristretto
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
 
@@ -76,8 +78,8 @@ func newStore() store {
 }
 
 // newStoreFromSnapshot returns a new store from a stored snapshot
-func newStoreFromSnapshot(dir string) (store, error) {
-	return newShardedMapFromSnapshot(dir)
+func newStoreFromSnapshot(dir string, itemType interface{}) (store, error) {
+	return newShardedMapFromSnapshot(dir, itemType)
 }
 
 const numShards uint64 = 256
@@ -113,7 +115,7 @@ func UnmarshalExpirationMap(b []byte) *expirationMap {
 	return &em
 }
 
-func newShardedMapFromSnapshot(path string) (*shardedMap, error) {
+func newShardedMapFromSnapshot(path string, itemType interface{}) (*shardedMap, error) {
 	sm := &shardedMap{
 		shards: make([]*lockedMap, int(numShards)),
 	}
@@ -152,7 +154,7 @@ func newShardedMapFromSnapshot(path string) (*shardedMap, error) {
 			return nil, err
 		}
 
-		sm.shards[i] = newLockedMapFromSnapshot(sm.expiryMap, buffer.Bytes())
+		sm.shards[i] = newLockedMapFromSnapshot(sm.expiryMap, buffer.Bytes(), itemType)
 	}
 
 	return sm, nil
@@ -249,8 +251,8 @@ func newLockedMap(em *expirationMap) *lockedMap {
 	}
 }
 
-func newLockedMapFromSnapshot(em *expirationMap, buf []byte) *lockedMap {
-	lockedMap := UnmarshalLockedMap(buf)
+func newLockedMapFromSnapshot(em *expirationMap, buf []byte, itemType interface{}) *lockedMap {
+	lockedMap := UnmarshalLockedMap(buf, itemType)
 	lockedMap.em = em
 
 	return lockedMap
@@ -274,13 +276,42 @@ func (m *lockedMap) marshalToBuffer(buffer io.Writer) error {
 	return nil
 }
 
-func UnmarshalLockedMap(b []byte) *lockedMap {
+func UnmarshalLockedMap(b []byte, itemType interface{}) *lockedMap {
 	lockedMap := &lockedMap{}
 
 	data := make(map[uint64]storeItem)
 
 	if len(b) > 1 {
-		err := msgpack.Unmarshal(b, &data)
+		dec := msgpack.NewDecoder(bytes.NewBuffer(b))
+
+		// If an itemType is passed in set up a decoder for it (used when storing structs as the item)
+		if itemType != nil {
+			dec.SetMapDecoder(func(d *msgpack.Decoder) (interface{}, error) {
+				n, err := d.DecodeMapLen()
+				if err != nil {
+					return nil, err
+				}
+
+				item := itemType
+				for i := 0; i < n; i++ {
+					mk, err := d.DecodeString()
+					if err != nil {
+						return nil, err
+					}
+
+					mv, err := d.DecodeInterface()
+					if err != nil {
+						return nil, err
+					}
+
+					reflect.ValueOf(item).Elem().FieldByName(mk).Set(reflect.ValueOf(mv))
+				}
+
+				return item, nil
+			})
+		}
+
+		err := dec.Decode(&data)
 		if err != nil {
 			glog.Fatal("msgpack.Unmarshal failed: ", err)
 		}
