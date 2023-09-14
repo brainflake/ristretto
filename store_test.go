@@ -141,7 +141,7 @@ func TestStoreSnapshot(t *testing.T) {
 		//lockedMap := UnmarshalLockedMap(lockedMapBuffer.Bytes())
 		//t.Log(lockedMap)
 
-		s2.shards[idx] = newLockedMapFromSnapshot(s2.expiryMap, readers[idx].Bytes())
+		s2.shards[idx] = newLockedMapFromSnapshot(s2.expiryMap, readers[idx].Bytes(), nil)
 	}
 
 	for idx, m := range s2.shards {
