@@ -304,7 +304,10 @@ func UnmarshalLockedMap(b []byte, itemType interface{}) *lockedMap {
 						return nil, err
 					}
 
-					reflect.ValueOf(item).Elem().FieldByName(mk).Set(reflect.ValueOf(mv))
+					field := reflect.ValueOf(item).Elem().FieldByName(mk)
+					if field.IsValid() {
+						reflect.ValueOf(item).Elem().FieldByName(mk).Set(reflect.ValueOf(mv))
+					}
 				}
 
 				return item, nil
