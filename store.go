@@ -44,6 +44,23 @@ type storeItem struct {
 	Expiration time.Time
 }
 
+func init() {
+	storeItemEncoder := func(enc *msgpack.Encoder, val reflect.Value) error {
+		s := val.Interface().(storeItem)
+
+		return enc.EncodeMulti(s.Key, s.Conflict, s.Value, s.Expiration)
+	}
+
+	// Note: if storing a non-primitive type this will be overridden
+	// Also ensure your type satisfies the msgpack.CustomDecoder + msgpack.CustomEncoder
+	// interfaces
+	storeItemDecoder := func(dec *msgpack.Decoder, val reflect.Value) error {
+		return dec.Decode(val)
+	}
+
+	msgpack.Register(storeItem{}, storeItemEncoder, storeItemDecoder)
+}
+
 // store is the interface fulfilled by all hash map implementations in this
 // file. Some hash map implementations are better suited for certain data
 // distributions than others, so this allows us to abstract that out for use
@@ -286,32 +303,31 @@ func UnmarshalLockedMap(b []byte, itemType interface{}) *lockedMap {
 
 		// If an itemType is passed in set up a decoder for it (used when storing structs as the item)
 		if itemType != nil {
-			dec.SetMapDecoder(func(d *msgpack.Decoder) (interface{}, error) {
-				n, err := d.DecodeMapLen()
-				if err != nil {
-					return nil, err
-				}
+			storeItemEncoder := func(enc *msgpack.Encoder, val reflect.Value) error {
+				s := val.Interface().(storeItem)
 
-				item := itemType
-				for i := 0; i < n; i++ {
-					mk, err := d.DecodeString()
-					if err != nil {
-						return nil, err
-					}
+				return enc.EncodeMulti(s.Key, s.Conflict, s.Value, s.Expiration)
+			}
 
-					mv, err := d.DecodeInterface()
-					if err != nil {
-						return nil, err
-					}
+			storeItemDecoder := func(dec *msgpack.Decoder, val reflect.Value) error {
+				ptr := val.Addr().UnsafePointer()
 
-					field := reflect.ValueOf(item).Elem().FieldByName(mk)
-					if field.IsValid() {
-						reflect.ValueOf(item).Elem().FieldByName(mk).Set(reflect.ValueOf(mv))
-					}
-				}
+				s := (*storeItem)(ptr)
 
-				return item, nil
-			})
+				dec.DecodeMulti(&s.Key, &s.Conflict)
+
+				ss := reflect.New(reflect.TypeOf(itemType))
+				decodefn := ss.MethodByName("DecodeMsgpack")
+
+				// TODO: check for return err here
+				decodefn.Call([]reflect.Value{reflect.ValueOf(dec)})
+
+				s.Value = ss.Interface()
+
+				return dec.Decode(&s.Expiration)
+			}
+
+			msgpack.Register(storeItem{}, storeItemEncoder, storeItemDecoder)
 		}
 
 		err := dec.Decode(&data)
