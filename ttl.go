@@ -19,6 +19,8 @@ package ristretto
 import (
 	"sync"
 	"time"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 var (
@@ -43,6 +45,43 @@ type bucket map[uint64]uint64
 type expirationMap struct {
 	sync.RWMutex
 	buckets map[int64]bucket
+}
+
+var _ msgpack.CustomDecoder = (*expirationMap)(nil)
+
+func (em *expirationMap) DecodeMsgpack(dec *msgpack.Decoder) error {
+	dec.SetMapDecoder(func(d *msgpack.Decoder) (interface{}, error) {
+		n, err := d.DecodeMapLen()
+		if err != nil {
+			return nil, err
+		}
+
+		m := make(map[int64]bucket)
+		for i := 0; i < n; i++ {
+			mk, err := d.DecodeInt64()
+			if err != nil {
+				return nil, err
+			}
+
+			mv, err := d.DecodeTypedMap()
+			if err != nil {
+				return nil, err
+			}
+
+			m[mk] = mv.(map[uint64]uint64)
+		}
+
+		return m, nil
+	})
+
+	out, err := dec.DecodeInterface()
+	if err != nil {
+		return err
+	}
+
+	em.buckets = out.(map[int64]bucket)
+
+	return err
 }
 
 func newExpirationMap() *expirationMap {
