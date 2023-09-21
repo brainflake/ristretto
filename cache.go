@@ -23,13 +23,17 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
 
 	"github.com/brainflake/ristretto/z"
+	"github.com/golang/glog"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 var (
@@ -233,6 +237,11 @@ func (c *Cache) Snapshot(dir string) error {
 		return err
 	}
 
+	err = c.Metrics.Snapshot(dir)
+	if err != nil {
+		return err
+	}
+
 	return c.store.Snapshot(dir)
 }
 
@@ -296,7 +305,10 @@ func NewCacheFromSnapshot(dir string, config *Config, itemType interface{}) (*Ca
 		cache.keyToHash = z.KeyToHash
 	}
 	if config.Metrics {
-		cache.collectMetrics()
+		err = cache.collectMetricsFromSnapshot(dir)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// NOTE: benchmarks seem to show that performance decreases the more
 	//       goroutines we have running cache.processItems(), so 1 should
@@ -601,6 +613,19 @@ func (c *Cache) collectMetrics() {
 	c.policy.CollectMetrics(c.Metrics)
 }
 
+func (c *Cache) collectMetricsFromSnapshot(dir string) error {
+	var err error
+
+	c.Metrics, err = newMetricsFromSnapshot(dir)
+	if err != nil {
+		return err
+	}
+
+	c.policy.CollectMetrics(c.Metrics)
+
+	return nil
+}
+
 type metricType int
 
 const (
@@ -674,6 +699,87 @@ func newMetrics() *Metrics {
 		}
 	}
 	return s
+}
+
+type MetricsExport struct {
+	mu   sync.RWMutex
+	Life *z.HistogramData
+}
+
+func (p *Metrics) Snapshot(dir string) error {
+	var err error
+
+	metricsBuffer, err := z.NewBufferPersistent(filepath.Join(dir, metricsFilename), 0)
+	if err != nil {
+		return err
+	}
+	defer metricsBuffer.Release()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	err = p.MarshalToBuffer(metricsBuffer)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (p *Metrics) MarshalToBuffer(buffer io.Writer) error {
+	export := MetricsExport{
+		Life: p.life,
+	}
+
+	e := msgpack.NewEncoder(buffer)
+	err := e.Encode(export)
+
+	if err != nil {
+		glog.Fatal("msgpack.Encode failed: ", err)
+	}
+
+	return err
+}
+
+func newMetricsFromSnapshot(dir string) (*Metrics, error) {
+	var err error
+
+	metricsFile := filepath.Join(dir, metricsFilename)
+	if _, err = os.Stat(metricsFile); os.IsNotExist(err) {
+		return nil, err
+	}
+
+	f, err := os.Open(metricsFile)
+	if err != nil {
+		return nil, err
+	}
+
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	buf, err := z.NewReadBuffer(f, int(stat.Size()))
+	if err != nil {
+		return nil, err
+	}
+
+	metrics := UnmarshalMetrics(buf.Bytes())
+
+	return metrics, nil
+}
+
+func UnmarshalMetrics(b []byte) *Metrics {
+	exportedMetrics := &MetricsExport{}
+
+	err := msgpack.Unmarshal(b, exportedMetrics)
+	if err != nil {
+		glog.Fatal("msgpack.Unmarshal failed: ", err)
+	}
+
+	return &Metrics{
+		life: exportedMetrics.Life,
+	}
 }
 
 func (p *Metrics) add(t metricType, hash, delta uint64) {

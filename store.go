@@ -34,6 +34,7 @@ import (
 const (
 	shardFilenameTemplate = "shard_%d.map"
 	expirationMapFilename = "expirations.map"
+	metricsFilename       = "metrics.hist"
 )
 
 // TODO: Do we need this to be a separate struct from Item?
