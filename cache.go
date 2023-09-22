@@ -702,7 +702,7 @@ func newMetrics() *Metrics {
 }
 
 type MetricsExport struct {
-	mu   sync.RWMutex
+	All  [doNotUse][]*uint64
 	Life *z.HistogramData
 }
 
@@ -728,6 +728,7 @@ func (p *Metrics) Snapshot(dir string) error {
 
 func (p *Metrics) MarshalToBuffer(buffer io.Writer) error {
 	export := MetricsExport{
+		All:  p.all,
 		Life: p.life,
 	}
 
@@ -778,6 +779,7 @@ func UnmarshalMetrics(b []byte) *Metrics {
 	}
 
 	return &Metrics{
+		all:  exportedMetrics.All,
 		life: exportedMetrics.Life,
 	}
 }
