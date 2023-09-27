@@ -215,16 +215,15 @@ func NewCache(config *Config) (*Cache, error) {
 
 // Snapshot creates a snapshot of the state of the cache
 // Note: we do this with minimal locking for performance reasons. Namely
-// we do not attempt to form a proper point-in-time view of the LFU structures
-// and sharded map data, preferring a "best effort" export of the data and allowing
-// for some drift in the admission/eviction policy structures.
+// we do not attempt to form a proper point-in-time view of the LFU structures,
+// metrics and sharded map data, preferring a "best effort" export of the data and
+// allowing for some drift in the admission/eviction policy structures and metrics.
 func (c *Cache) Snapshot(dir string) error {
 	var err error
 	var dirInfo os.FileInfo
 
 	// check that dir exists and is writable
 	if dirInfo, err = os.Stat(dir); os.IsNotExist(err) {
-		// path doesn't exist - we should try to create it here
 		return err
 	}
 	if !dirInfo.IsDir() {
@@ -237,6 +236,7 @@ func (c *Cache) Snapshot(dir string) error {
 		return err
 	}
 
+	// snapshot cache metrics
 	err = c.Metrics.Snapshot(dir)
 	if err != nil {
 		return err
@@ -249,9 +249,8 @@ func NewCacheFromSnapshot(dir string, config *Config, itemType interface{}) (*Ca
 	var err error
 	var dirInfo os.FileInfo
 
-	// check that dir exists and is writable
+	// check that dir exists
 	if dirInfo, err = os.Stat(dir); os.IsNotExist(err) {
-		// path doesn't exist - we should try to create it here
 		return nil, err
 	}
 	if !dirInfo.IsDir() {
