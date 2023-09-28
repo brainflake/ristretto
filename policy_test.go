@@ -116,10 +116,22 @@ func TestPolicySnapshot(t *testing.T) {
 	err = p.evict.MarshalToBuffer(&evictionWriter)
 	require.Nil(t, err)
 
-	//p2 := newDefaultPolicyFromSnapshot(&admissionWriter, &evictionWriter)
-	//require.NotNil(t, p2)
-	//require.Equal(t, p.admit, p2.admit)
-	//require.Equal(t, p.evict, p2.evict)
+	unmarshaledAdmission, err := UnmarshalTinyLFU(admissionWriter.Bytes())
+	require.Nil(t, err)
+
+	unmarshaledEviction, err := UnmarshalSampledLFU(evictionWriter.Bytes())
+	require.Nil(t, err)
+
+	p2 := defaultPolicy{
+		admit:   unmarshaledAdmission,
+		evict:   unmarshaledEviction,
+		itemsCh: make(chan []uint64, 3),
+		stop:    make(chan struct{}),
+	}
+
+	require.NotNil(t, p2)
+	require.Equal(t, p.admit, p2.admit)
+	require.Equal(t, p.evict, p2.evict)
 }
 
 func TestPolicyHas(t *testing.T) {
