@@ -32,7 +32,6 @@ import (
 	"unsafe"
 
 	"github.com/brainflake/ristretto/z"
-	"github.com/golang/glog"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -732,13 +731,7 @@ func (p *Metrics) MarshalToBuffer(buffer io.Writer) error {
 	}
 
 	e := msgpack.NewEncoder(buffer)
-	err := e.Encode(export)
-
-	if err != nil {
-		glog.Fatal("msgpack.Encode failed: ", err)
-	}
-
-	return err
+	return e.Encode(export)
 }
 
 func newMetricsFromSnapshot(dir string) (*Metrics, error) {
@@ -764,23 +757,21 @@ func newMetricsFromSnapshot(dir string) (*Metrics, error) {
 		return nil, err
 	}
 
-	metrics := UnmarshalMetrics(buf.Bytes())
-
-	return metrics, nil
+	return UnmarshalMetrics(buf.Bytes())
 }
 
-func UnmarshalMetrics(b []byte) *Metrics {
+func UnmarshalMetrics(b []byte) (*Metrics, error) {
 	exportedMetrics := &MetricsExport{}
 
 	err := msgpack.Unmarshal(b, exportedMetrics)
 	if err != nil {
-		glog.Fatal("msgpack.Unmarshal failed: ", err)
+		return nil, err
 	}
 
 	return &Metrics{
 		all:  exportedMetrics.All,
 		life: exportedMetrics.Life,
-	}
+	}, nil
 }
 
 func (p *Metrics) add(t metricType, hash, delta uint64) {
