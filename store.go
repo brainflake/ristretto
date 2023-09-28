@@ -39,17 +39,17 @@ const (
 
 // TODO: Do we need this to be a separate struct from Item?
 type storeItem struct {
-	Key        uint64
-	Conflict   uint64
-	Value      interface{}
-	Expiration time.Time
+	key        uint64
+	conflict   uint64
+	value      interface{}
+	expiration time.Time
 }
 
 func init() {
 	storeItemEncoder := func(enc *msgpack.Encoder, val reflect.Value) error {
 		s := val.Interface().(storeItem)
 
-		return enc.EncodeMulti(s.Key, s.Conflict, s.Value, s.Expiration)
+		return enc.EncodeMulti(s.key, s.conflict, s.value, s.expiration)
 	}
 
 	// Note: if storing a non-primitive type this will be overridden
@@ -138,6 +138,7 @@ func newShardedMapFromSnapshot(path string, itemType interface{}) (*shardedMap, 
 		shards: make([]*lockedMap, int(numShards)),
 	}
 
+	// TODO: process interim expirations that would have happened since the snapshot
 	file, err := os.OpenFile(filepath.Join(path, expirationMapFilename), os.O_RDONLY, 0666)
 	defer file.Close()
 	if err != nil {
@@ -307,7 +308,7 @@ func UnmarshalLockedMap(b []byte, itemType interface{}) *lockedMap {
 			storeItemEncoder := func(enc *msgpack.Encoder, val reflect.Value) error {
 				s := val.Interface().(storeItem)
 
-				return enc.EncodeMulti(s.Key, s.Conflict, s.Value, s.Expiration)
+				return enc.EncodeMulti(s.key, s.conflict, s.value, s.expiration)
 			}
 
 			storeItemDecoder := func(dec *msgpack.Decoder, val reflect.Value) error {
@@ -315,7 +316,7 @@ func UnmarshalLockedMap(b []byte, itemType interface{}) *lockedMap {
 
 				s := (*storeItem)(ptr)
 
-				dec.DecodeMulti(&s.Key, &s.Conflict)
+				dec.DecodeMulti(&s.key, &s.conflict)
 
 				ss := reflect.New(reflect.TypeOf(itemType))
 				decodefn := ss.MethodByName("DecodeMsgpack")
@@ -323,9 +324,9 @@ func UnmarshalLockedMap(b []byte, itemType interface{}) *lockedMap {
 				// TODO: check for return err here
 				decodefn.Call([]reflect.Value{reflect.ValueOf(dec)})
 
-				s.Value = ss.Interface()
+				s.value = ss.Interface()
 
-				return dec.Decode(&s.Expiration)
+				return dec.Decode(&s.expiration)
 			}
 
 			msgpack.Register(storeItem{}, storeItemEncoder, storeItemDecoder)
@@ -349,21 +350,21 @@ func (m *lockedMap) get(key, conflict uint64) (interface{}, bool) {
 	if !ok {
 		return nil, false
 	}
-	if conflict != 0 && (conflict != item.Conflict) {
+	if conflict != 0 && (conflict != item.conflict) {
 		return nil, false
 	}
 
 	// Handle expired items.
-	if !item.Expiration.IsZero() && time.Now().After(item.Expiration) {
+	if !item.expiration.IsZero() && time.Now().After(item.expiration) {
 		return nil, false
 	}
-	return item.Value, true
+	return item.value, true
 }
 
 func (m *lockedMap) Expiration(key uint64) time.Time {
 	m.RLock()
 	defer m.RUnlock()
-	return m.data[key].Expiration
+	return m.data[key].expiration
 }
 
 func (m *lockedMap) Set(i *Item) {
@@ -379,10 +380,10 @@ func (m *lockedMap) Set(i *Item) {
 	if ok {
 		// The item existed already. We need to check the conflict key and reject the
 		// update if they do not match. Only after that the expiration map is updated.
-		if i.Conflict != 0 && (i.Conflict != item.Conflict) {
+		if i.Conflict != 0 && (i.Conflict != item.conflict) {
 			return
 		}
-		m.em.update(i.Key, i.Conflict, item.Expiration, i.Expiration)
+		m.em.update(i.Key, i.Conflict, item.expiration, i.Expiration)
 	} else {
 		// The value is not in the map already. There's no need to return anything.
 		// Simply add the expiration map.
@@ -390,10 +391,10 @@ func (m *lockedMap) Set(i *Item) {
 	}
 
 	m.data[i.Key] = storeItem{
-		Key:        i.Key,
-		Conflict:   i.Conflict,
-		Value:      i.Value,
-		Expiration: i.Expiration,
+		key:        i.Key,
+		conflict:   i.Conflict,
+		value:      i.Value,
+		expiration: i.Expiration,
 	}
 }
 
@@ -404,18 +405,18 @@ func (m *lockedMap) Del(key, conflict uint64) (uint64, interface{}) {
 		m.Unlock()
 		return 0, nil
 	}
-	if conflict != 0 && (conflict != item.Conflict) {
+	if conflict != 0 && (conflict != item.conflict) {
 		m.Unlock()
 		return 0, nil
 	}
 
-	if !item.Expiration.IsZero() {
-		m.em.del(key, item.Expiration)
+	if !item.expiration.IsZero() {
+		m.em.del(key, item.expiration)
 	}
 
 	delete(m.data, key)
 	m.Unlock()
-	return item.Conflict, item.Value
+	return item.conflict, item.value
 }
 
 func (m *lockedMap) Update(newItem *Item) (interface{}, bool) {
@@ -425,21 +426,21 @@ func (m *lockedMap) Update(newItem *Item) (interface{}, bool) {
 		m.Unlock()
 		return nil, false
 	}
-	if newItem.Conflict != 0 && (newItem.Conflict != item.Conflict) {
+	if newItem.Conflict != 0 && (newItem.Conflict != item.conflict) {
 		m.Unlock()
 		return nil, false
 	}
 
-	m.em.update(newItem.Key, newItem.Conflict, item.Expiration, newItem.Expiration)
+	m.em.update(newItem.Key, newItem.Conflict, item.expiration, newItem.Expiration)
 	m.data[newItem.Key] = storeItem{
-		Key:        newItem.Key,
-		Conflict:   newItem.Conflict,
-		Value:      newItem.Value,
-		Expiration: newItem.Expiration,
+		key:        newItem.Key,
+		conflict:   newItem.Conflict,
+		value:      newItem.Value,
+		expiration: newItem.Expiration,
 	}
 
 	m.Unlock()
-	return item.Value, true
+	return item.value, true
 }
 
 func (m *lockedMap) Clear(onEvict itemCallback) {
@@ -447,9 +448,9 @@ func (m *lockedMap) Clear(onEvict itemCallback) {
 	i := &Item{}
 	if onEvict != nil {
 		for _, si := range m.data {
-			i.Key = si.Key
-			i.Conflict = si.Conflict
-			i.Value = si.Value
+			i.Key = si.key
+			i.Conflict = si.conflict
+			i.Value = si.value
 			onEvict(i)
 		}
 	}
