@@ -107,10 +107,6 @@ type shardedMap struct {
 	expiryMap *expirationMap
 }
 
-type sharedMapSnapshot struct {
-	offsets []uint64
-}
-
 func newShardedMap() *shardedMap {
 	sm := &shardedMap{
 		shards:    make([]*lockedMap, int(numShards)),
