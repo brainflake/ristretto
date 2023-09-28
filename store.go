@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/brainflake/ristretto/z"
-	"github.com/golang/glog"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 )
 
@@ -118,15 +117,15 @@ func newShardedMap() *shardedMap {
 	return sm
 }
 
-func UnmarshalExpirationMap(b []byte) *expirationMap {
+func UnmarshalExpirationMap(b []byte) (*expirationMap, error) {
 	var em expirationMap
 
 	err := msgpack.Unmarshal(b, &em)
 	if err != nil {
-		glog.Fatal("msgpack.Unmarshal failed: ", err)
+		return nil, err
 	}
 
-	return &em
+	return &em, nil
 }
 
 func newShardedMapFromSnapshot(path string, itemType interface{}) (*shardedMap, error) {
@@ -147,11 +146,17 @@ func newShardedMapFromSnapshot(path string, itemType interface{}) (*shardedMap, 
 	}
 
 	buffer, err := z.NewReadBuffer(file, int(stat.Size()))
+	if err != nil {
+		return nil, err
+	}
 
-	sm.expiryMap = UnmarshalExpirationMap(buffer.Bytes())
+	sm.expiryMap, err = UnmarshalExpirationMap(buffer.Bytes())
+	if err != nil {
+		return nil, err
+	}
 
 	for i := range sm.shards {
-		shardFile := fmt.Sprintf("shard_%d.map", i)
+		shardFile := fmt.Sprintf(shardFilenameTemplate, i)
 		file, err := os.OpenFile(filepath.Join(path, shardFile), os.O_RDONLY, 0666)
 		defer file.Close()
 
@@ -169,7 +174,10 @@ func newShardedMapFromSnapshot(path string, itemType interface{}) (*shardedMap, 
 			return nil, err
 		}
 
-		sm.shards[i] = newLockedMapFromSnapshot(sm.expiryMap, buffer.Bytes(), itemType)
+		sm.shards[i], err = newLockedMapFromSnapshot(sm.expiryMap, buffer.Bytes(), itemType)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return sm, nil
@@ -248,11 +256,6 @@ func (sm *shardedMap) Snapshot(dir string) error {
 	return nil
 }
 
-type exportedLockedMap struct {
-	Data map[uint64]storeItem
-	Em   *expirationMap
-}
-
 type lockedMap struct {
 	sync.RWMutex
 	data map[uint64]storeItem
@@ -266,11 +269,15 @@ func newLockedMap(em *expirationMap) *lockedMap {
 	}
 }
 
-func newLockedMapFromSnapshot(em *expirationMap, buf []byte, itemType interface{}) *lockedMap {
-	lockedMap := UnmarshalLockedMap(buf, itemType)
+func newLockedMapFromSnapshot(em *expirationMap, buf []byte, itemType interface{}) (*lockedMap, error) {
+	lockedMap, err := UnmarshalLockedMap(buf, itemType)
+	if err != nil {
+		return nil, err
+	}
+
 	lockedMap.em = em
 
-	return lockedMap
+	return lockedMap, nil
 }
 
 func (m *lockedMap) marshalToBuffer(buffer io.Writer) error {
@@ -279,19 +286,10 @@ func (m *lockedMap) marshalToBuffer(buffer io.Writer) error {
 
 	e := msgpack.NewEncoder(buffer)
 
-	//exportedMap := &exportedLockedMap{
-	//	Data: m.data,
-	//	Em:   m.em,
-	//}
-	err := e.Encode(m.data)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return e.Encode(m.data)
 }
 
-func UnmarshalLockedMap(b []byte, itemType interface{}) *lockedMap {
+func UnmarshalLockedMap(b []byte, itemType interface{}) (*lockedMap, error) {
 	lockedMap := &lockedMap{}
 
 	data := make(map[uint64]storeItem)
@@ -330,13 +328,13 @@ func UnmarshalLockedMap(b []byte, itemType interface{}) *lockedMap {
 
 		err := dec.Decode(&data)
 		if err != nil {
-			glog.Fatal("msgpack.Unmarshal failed: ", err)
+			return nil, err
 		}
 	}
 
 	lockedMap.data = data
 
-	return lockedMap
+	return lockedMap, nil
 }
 
 func (m *lockedMap) get(key, conflict uint64) (interface{}, bool) {

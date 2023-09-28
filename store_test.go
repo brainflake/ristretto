@@ -130,6 +130,8 @@ func TestStoreSnapshot(t *testing.T) {
 		shards:    make([]*lockedMap, int(numShards)),
 		expiryMap: s.expiryMap,
 	}
+
+	var err error
 	for idx := range readers {
 		//t.Log("Reading", idx)
 		//var b []byte
@@ -144,7 +146,8 @@ func TestStoreSnapshot(t *testing.T) {
 		//lockedMap := UnmarshalLockedMap(lockedMapBuffer.Bytes())
 		//t.Log(lockedMap)
 
-		s2.shards[idx] = newLockedMapFromSnapshot(s2.expiryMap, readers[idx].Bytes(), nil)
+		s2.shards[idx], err = newLockedMapFromSnapshot(s2.expiryMap, readers[idx].Bytes(), nil)
+		require.Nil(t, err)
 	}
 
 	for idx, m := range s2.shards {
