@@ -309,8 +309,9 @@ func TestMarshaling(t *testing.T) {
 		err := a.MarshalToBuffer(&buffer)
 		require.Nil(t, err)
 
-		unmarshaledA := UnmarshalTinyLFU(buffer.Bytes())
+		unmarshaledA, err := UnmarshalTinyLFU(buffer.Bytes())
 
+		require.Nil(t, err)
 		require.Equal(t, a, unmarshaledA)
 	})
 
@@ -326,8 +327,9 @@ func TestMarshaling(t *testing.T) {
 		err := a.MarshalToBuffer(&buffer)
 		require.Nil(t, err)
 
-		unmarshaledA := UnmarshalSampledLFU(buffer.Bytes())
+		unmarshaledA, err := UnmarshalSampledLFU(buffer.Bytes())
 
+		require.Nil(t, err)
 		require.Equal(t, a, unmarshaledA)
 	})
 }

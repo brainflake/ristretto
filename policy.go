@@ -25,7 +25,6 @@ import (
 	"sync/atomic"
 
 	"github.com/brainflake/ristretto/z"
-	"github.com/golang/glog"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 )
 
@@ -34,8 +33,8 @@ const (
 	// candidates. 5 seems to be the most optimal number [citation needed].
 	lfuSample = 5
 
-	admissionLFUFilename = "admission_policy.lfu"
-	evictionLFUFilename  = "eviction_policy.lfu"
+	admissionLFUFilename = "admission_policy.msgpack"
+	evictionLFUFilename  = "eviction_policy.msgpack"
 )
 
 // policy is the interface encapsulating eviction/admission behavior.
@@ -399,9 +398,7 @@ func newSampledLFUFromSnapshot(file string) (*sampledLFU, error) {
 		return nil, err
 	}
 
-	sLFU := UnmarshalSampledLFU(buf.Bytes())
-
-	return sLFU, err
+	return UnmarshalSampledLFU(buf.Bytes())
 }
 
 func (p *sampledLFU) MarshalToBuffer(buffer io.Writer) error {
@@ -416,19 +413,19 @@ func (p *sampledLFU) MarshalToBuffer(buffer io.Writer) error {
 	return e.Encode(export)
 }
 
-func UnmarshalSampledLFU(b []byte) *sampledLFU {
+func UnmarshalSampledLFU(b []byte) (*sampledLFU, error) {
 	sLFU := &sampledLFUExport{}
 
 	err := msgpack.Unmarshal(b, sLFU)
 	if err != nil {
-		glog.Fatal("msgpack.Unmarshal failed: ", err)
+		return nil, err
 	}
 
 	return &sampledLFU{
 		maxCost:  sLFU.MaxCost,
 		used:     sLFU.Used,
 		keyCosts: sLFU.KeyCosts,
-	}
+	}, nil
 }
 
 func (p *sampledLFU) getMaxCost() int64 {
@@ -539,9 +536,7 @@ func newTinyLFUFromSnapshot(file string) (*tinyLFU, error) {
 		return nil, err
 	}
 
-	tLFU := UnmarshalTinyLFU(buf.Bytes())
-
-	return tLFU, nil
+	return UnmarshalTinyLFU(buf.Bytes())
 }
 
 func (p *tinyLFU) MarshalToBuffer(buffer io.Writer) error {
@@ -553,21 +548,15 @@ func (p *tinyLFU) MarshalToBuffer(buffer io.Writer) error {
 	}
 
 	e := msgpack.NewEncoder(buffer)
-	err := e.Encode(export)
-
-	if err != nil {
-		glog.Fatal("msgpack.Encode failed: ", err)
-	}
-
-	return err
+	return e.Encode(export)
 }
 
-func UnmarshalTinyLFU(b []byte) *tinyLFU {
+func UnmarshalTinyLFU(b []byte) (*tinyLFU, error) {
 	tLFU := &tinyLFUExport{}
 
 	err := msgpack.Unmarshal(b, tLFU)
 	if err != nil {
-		glog.Fatal("msgpack.Unmarshal failed: ", err)
+		return nil, err
 	}
 
 	return &tinyLFU{
@@ -575,7 +564,7 @@ func UnmarshalTinyLFU(b []byte) *tinyLFU {
 		door:    tLFU.Door.ToBloom(),
 		incrs:   tLFU.Incrs,
 		resetAt: tLFU.ResetAt,
-	}
+	}, nil
 }
 
 func (p *tinyLFU) Push(keys []uint64) {
