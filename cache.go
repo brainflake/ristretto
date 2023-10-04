@@ -235,10 +235,12 @@ func (c *Cache) Snapshot(dir string) error {
 		return err
 	}
 
-	// snapshot cache metrics
-	err = c.Metrics.Snapshot(dir)
-	if err != nil {
-		return err
+	// snapshot cache metrics (if metrics are enabled)
+	if c.Metrics != nil {
+		err = c.Metrics.Snapshot(dir)
+		if err != nil {
+			return err
+		}
 	}
 
 	return c.store.Snapshot(dir)
