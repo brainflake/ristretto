@@ -28,6 +28,7 @@ import (
 
 	"github.com/brainflake/ristretto/z"
 	msgpack "github.com/vmihailenco/msgpack/v5"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -155,29 +156,40 @@ func newShardedMapFromSnapshot(path string, itemType interface{}) (*shardedMap, 
 		return nil, err
 	}
 
+	var errGrp errgroup.Group
+
 	for i := range sm.shards {
-		shardFile := fmt.Sprintf(shardFilenameTemplate, i)
-		file, err := os.OpenFile(filepath.Join(path, shardFile), os.O_RDONLY, 0666)
-		defer file.Close()
+		i := i
+		errGrp.Go(func() error {
+			shardFile := fmt.Sprintf(shardFilenameTemplate, i)
+			file, err := os.OpenFile(filepath.Join(path, shardFile), os.O_RDONLY, 0666)
+			defer file.Close()
 
-		if err != nil {
-			return nil, err
-		}
+			if err != nil {
+				return err
+			}
 
-		stat, err := file.Stat()
-		if err != nil {
-			return nil, err
-		}
+			stat, err := file.Stat()
+			if err != nil {
+				return err
+			}
 
-		buffer, err := z.NewReadBuffer(file, int(stat.Size()))
-		if err != nil {
-			return nil, err
-		}
+			buffer, err := z.NewReadBuffer(file, int(stat.Size()))
+			if err != nil {
+				return err
+			}
 
-		sm.shards[i], err = newLockedMapFromSnapshot(sm.expiryMap, buffer.Bytes(), itemType)
-		if err != nil {
-			return nil, err
-		}
+			sm.shards[i], err = newLockedMapFromSnapshot(sm.expiryMap, buffer.Bytes(), itemType)
+			if err != nil {
+				return err
+			}
+
+			return nil
+		})
+	}
+
+	if err := errGrp.Wait(); err != nil {
+		return nil, err
 	}
 
 	return sm, nil
