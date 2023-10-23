@@ -18,6 +18,7 @@ package ristretto
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -304,9 +305,25 @@ func (m *lockedMap) marshalToBuffer(buffer io.Writer) error {
 func UnmarshalLockedMap(b []byte, itemType interface{}) (*lockedMap, error) {
 	lockedMap := &lockedMap{}
 
-	data := make(map[uint64]storeItem)
+	var data map[uint64]storeItem
 
 	if len(b) > 1 {
+		var size uint64
+
+		// We want to pre-size the map to avoid unnecessary allocations.
+		// The map size is available in the first few bytes of the msgpack format.
+		// see https://github.com/msgpack/msgpack/blob/master/spec.md#map-format-family
+		if b[0]&0xf0 == 0x80 {
+			sizeByte := []byte{b[0] & 0x0f}
+			size, _ = binary.ReadUvarint(bytes.NewBuffer(sizeByte))
+		} else if b[0] == 0xde {
+			size = uint64(binary.BigEndian.Uint16(b[1:3]))
+		} else if b[0] == 0xdf {
+			size = uint64(binary.BigEndian.Uint32(b[1:5]))
+		}
+
+		data = make(map[uint64]storeItem, size)
+
 		dec := msgpack.NewDecoder(bytes.NewBuffer(b))
 
 		// If an itemType is passed in set up a decoder for it (used when storing structs as the item)
