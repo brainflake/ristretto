@@ -212,40 +212,6 @@ func NewCache(config *Config) (*Cache, error) {
 	return cache, nil
 }
 
-// Snapshot creates a snapshot of the state of the cache
-// Note: we do this with minimal locking for performance reasons. Namely
-// we do not attempt to form a proper point-in-time view of the LFU structures,
-// metrics and sharded map data, preferring a "best effort" export of the data and
-// allowing for some drift in the admission/eviction policy structures and metrics.
-func (c *Cache) Snapshot(dir string) error {
-	var err error
-	var dirInfo os.FileInfo
-
-	// check that dir exists and is writable
-	if dirInfo, err = os.Stat(dir); os.IsNotExist(err) {
-		return err
-	}
-	if !dirInfo.IsDir() {
-		return errors.New("snapshot path is not a directory")
-	}
-
-	// snapshot policy
-	err = c.policy.Snapshot(dir)
-	if err != nil {
-		return err
-	}
-
-	// snapshot cache metrics (if metrics are enabled)
-	if c.Metrics != nil {
-		err = c.Metrics.Snapshot(dir)
-		if err != nil {
-			return err
-		}
-	}
-
-	return c.store.Snapshot(dir)
-}
-
 func NewCacheFromSnapshot(dir string, config *Config, itemType interface{}) (*Cache, error) {
 	var err error
 	var dirInfo os.FileInfo
@@ -315,6 +281,40 @@ func NewCacheFromSnapshot(dir string, config *Config, itemType interface{}) (*Ca
 	//       usually be sufficient
 	go cache.processItems()
 	return cache, nil
+}
+
+// Snapshot creates a snapshot of the state of the cache
+// Note: we do this with minimal locking for performance reasons. Namely
+// we do not attempt to form a proper point-in-time view of the LFU structures,
+// metrics and sharded map data, preferring a "best effort" export of the data and
+// allowing for some drift in the admission/eviction policy structures and metrics.
+func (c *Cache) Snapshot(dir string) error {
+	var err error
+	var dirInfo os.FileInfo
+
+	// check that dir exists and is writable
+	if dirInfo, err = os.Stat(dir); os.IsNotExist(err) {
+		return err
+	}
+	if !dirInfo.IsDir() {
+		return errors.New("snapshot path is not a directory")
+	}
+
+	// snapshot policy
+	err = c.policy.Snapshot(dir)
+	if err != nil {
+		return err
+	}
+
+	// snapshot cache metrics (if metrics are enabled)
+	if c.Metrics != nil {
+		err = c.Metrics.Snapshot(dir)
+		if err != nil {
+			return err
+		}
+	}
+
+	return c.store.Snapshot(dir)
 }
 
 // Wait blocks until all buffered writes have been applied. This ensures a call to Set()
