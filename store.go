@@ -136,7 +136,7 @@ func newShardedMapFromSnapshot(path string, itemType interface{}) (*shardedMap, 
 	}
 
 	// TODO: process interim expirations that would have happened since the snapshot
-	file, err := os.OpenFile(filepath.Join(path, expirationMapFilename), os.O_RDONLY, 0666)
+	file, err := os.Open(filepath.Join(path, expirationMapFilename))
 	defer file.Close()
 	if err != nil {
 		return nil, err
@@ -163,7 +163,7 @@ func newShardedMapFromSnapshot(path string, itemType interface{}) (*shardedMap, 
 		i := i
 		errGrp.Go(func() error {
 			shardFile := fmt.Sprintf(shardFilenameTemplate, i)
-			file, err := os.OpenFile(filepath.Join(path, shardFile), os.O_RDONLY, 0666)
+			file, err := os.Open(filepath.Join(path, shardFile))
 			defer file.Close()
 
 			if err != nil {
