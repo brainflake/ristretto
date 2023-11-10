@@ -29,6 +29,8 @@ import (
 	"github.com/golang/glog"
 )
 
+//go:generate greenpack -unexported
+
 // helper
 var mask = []uint8{1, 2, 4, 8, 16, 32, 64, 128}
 
@@ -108,12 +110,12 @@ func NewBloomExport(b *Bloom) *BloomExport {
 
 // Bloom filter
 type Bloom struct {
-	bitset  []uint64
-	ElemNum uint64
-	sizeExp uint64
-	size    uint64
-	setLocs uint64
-	shift   uint64
+	bitset  []uint64 `zid:"0"`
+	ElemNum uint64   `zid:"1"`
+	sizeExp uint64   `zid:"2"`
+	size    uint64   `zid:"3"`
+	setLocs uint64   `zid:"4"`
+	shift   uint64   `zid:"5"`
 }
 
 // <--- http://www.cse.yorku.ca/~oz/hash.html

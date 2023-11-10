@@ -28,9 +28,12 @@ import (
 	"time"
 
 	"github.com/brainflake/ristretto/z"
+	"github.com/glycerine/greenpack/msgp"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 	"golang.org/x/sync/errgroup"
 )
+
+//go:generate greenpack -unexported
 
 const (
 	shardFilenameTemplate = "shard_%d.msgpack"
@@ -40,10 +43,10 @@ const (
 
 // TODO: Do we need this to be a separate struct from Item?
 type storeItem struct {
-	key        uint64
-	conflict   uint64
-	value      interface{}
-	expiration time.Time
+	key        uint64      `zid:"0"`
+	conflict   uint64      `zid:"1"`
+	value      interface{} `zid:"2"`
+	expiration time.Time   `zid:"3"`
 }
 
 func init() {
@@ -70,6 +73,11 @@ func init() {
 //
 // Every store is safe for concurrent usage.
 type store interface {
+	msgp.Decodable
+	msgp.Encodable
+	msgp.Marshaler
+	msgp.Unmarshaler
+	msgp.Sizer
 	// Get returns the value associated with the key parameter.
 	Get(uint64, uint64) (interface{}, bool)
 	// Expiration returns the expiration time for this key.
@@ -104,8 +112,8 @@ func newStoreFromSnapshot(dir string, itemType interface{}) (store, error) {
 const numShards uint64 = 256
 
 type shardedMap struct {
-	shards    []*lockedMap
-	expiryMap *expirationMap
+	shards    []*lockedMap   `zid:"0"`
+	expiryMap *expirationMap `zid:"1"`
 }
 
 func newShardedMap() *shardedMap {
@@ -117,17 +125,6 @@ func newShardedMap() *shardedMap {
 		sm.shards[i] = newLockedMap(sm.expiryMap)
 	}
 	return sm
-}
-
-func UnmarshalExpirationMap(b []byte) (*expirationMap, error) {
-	var em expirationMap
-
-	err := msgpack.Unmarshal(b, &em)
-	if err != nil {
-		return nil, err
-	}
-
-	return &em, nil
 }
 
 func newShardedMapFromSnapshot(path string, itemType interface{}) (*shardedMap, error) {
@@ -241,12 +238,17 @@ func (sm *shardedMap) Snapshot(dir string) error {
 	}
 	defer expiryBuffer.Release()
 
-	e := msgpack.NewEncoder(expiryBuffer)
-
-	err = e.Encode(sm.expiryMap)
+	err = msgp.Encode(expiryBuffer, sm.expiryMap)
 	if err != nil {
 		return err
 	}
+
+	//e := msgpack.NewEncoder(expiryBuffer)
+	//
+	//err = e.Encode(sm.expiryMap)
+	//if err != nil {
+	//	return err
+	//}
 
 	// Note these are done serially here so as not to read lock all of the shards at once, although this may
 	// not be a concern
@@ -270,9 +272,9 @@ func (sm *shardedMap) Snapshot(dir string) error {
 }
 
 type lockedMap struct {
-	sync.RWMutex
-	data map[uint64]storeItem
-	em   *expirationMap
+	sync.RWMutex `msg:"-"`
+	data         map[uint64]storeItem `zid:"0"`
+	em           *expirationMap       `msg:"-"`
 }
 
 func newLockedMap(em *expirationMap) *lockedMap {

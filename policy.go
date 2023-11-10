@@ -17,6 +17,8 @@
 package ristretto
 
 import (
+	"bytes"
+	"github.com/glycerine/greenpack/msgp"
 	"io"
 	"math"
 	"os"
@@ -27,6 +29,8 @@ import (
 	"github.com/brainflake/ristretto/z"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 )
+
+//go:generate greenpack -unexported
 
 const (
 	// lfuSample is the number of items to sample when looking at eviction
@@ -44,6 +48,11 @@ const (
 //	are probably only going to use/implement/maintain one policy.
 type policy interface {
 	ringConsumer
+	msgp.Decodable
+	msgp.Encodable
+	msgp.Marshaler
+	msgp.Unmarshaler
+	msgp.Sizer
 	// Add attempts to Add the key-cost pair to the Policy. It returns a slice
 	// of evicted keys and a bool denoting whether or not the key-cost pair
 	// was added. If it returns true, the key should be stored in cache.
@@ -111,13 +120,13 @@ func newDefaultPolicyFromSnapshot(dir string) (policy, error) {
 }
 
 type defaultPolicy struct {
-	sync.Mutex
-	admit    *tinyLFU
-	evict    *sampledLFU
-	itemsCh  chan []uint64
-	stop     chan struct{}
-	isClosed bool
-	metrics  *Metrics
+	sync.Mutex `msg:"-"`
+	admit      *tinyLFU
+	evict      *sampledLFU   `msg:"-"`
+	itemsCh    chan []uint64 `msg:"-"`
+	stop       chan struct{} `msg:"-"`
+	isClosed   bool          `msg:"-"`
+	metrics    *Metrics      `msg:"-"`
 }
 
 func newDefaultPolicy(numCounters, maxCost int64) *defaultPolicy {
@@ -367,10 +376,10 @@ type sampledLFU struct {
 	// for 64-bit alignment of 64-bit words accessed atomically.
 	// The first word in a variable or in an allocated struct, array,
 	// or slice can be relied upon to be 64-bit aligned."
-	maxCost  int64
-	used     int64
-	metrics  *Metrics
-	keyCosts map[uint64]int64
+	maxCost  int64            `zid:"0"`
+	used     int64            `zid:"1"`
+	metrics  *Metrics         `zid:"2"`
+	keyCosts map[uint64]int64 `zid:"3"`
 }
 
 func newSampledLFU(maxCost int64) *sampledLFU {
@@ -399,6 +408,23 @@ func newSampledLFUFromSnapshot(file string) (*sampledLFU, error) {
 	}
 
 	return UnmarshalSampledLFU(buf.Bytes())
+}
+
+func (p *sampledLFU) MarshalToBufferGreen(buffer io.Writer) error {
+	return msgp.Encode(buffer, p)
+}
+
+func UnmarshalSampledLFUGreen(b []byte) (*sampledLFU, error) {
+	sLFU := &sampledLFU{}
+
+	buffer := bytes.NewBuffer(b)
+
+	err := msgp.Decode(buffer, sLFU)
+	if err != nil {
+		return sLFU, err
+	}
+
+	return sLFU, err
 }
 
 func (p *sampledLFU) MarshalToBuffer(buffer io.Writer) error {
@@ -494,20 +520,20 @@ func (p *sampledLFU) clear() {
 }
 
 type tinyLFUExport struct {
-	Freq    *cmSketchExport
-	Door    *z.BloomExport
-	Incrs   int64
-	ResetAt int64
+	Freq    *cmSketchExport `zid:"0"`
+	Door    *z.BloomExport  `zid:"1"`
+	Incrs   int64           `zid:"2"`
+	ResetAt int64           `zid:"3"`
 }
 
 // tinyLFU is an admission helper that keeps track of access frequency using
 // tiny (4-bit) counters in the form of a count-min sketch.
 // tinyLFU is NOT thread safe.
 type tinyLFU struct {
-	freq    *cmSketch
-	door    *z.Bloom
-	incrs   int64
-	resetAt int64
+	freq    *cmSketch `zid:"0"`
+	door    *z.Bloom  `zid:"1"`
+	incrs   int64     `zid:"2"`
+	resetAt int64     `zid:"3"`
 }
 
 func newTinyLFU(numCounters int64) *tinyLFU {
@@ -539,6 +565,10 @@ func newTinyLFUFromSnapshot(file string) (*tinyLFU, error) {
 	return UnmarshalTinyLFU(buf.Bytes())
 }
 
+func (p *tinyLFU) MarshalToBufferGreen(buffer io.Writer) error {
+	return msgp.Encode(buffer, p)
+}
+
 func (p *tinyLFU) MarshalToBuffer(buffer io.Writer) error {
 	export := tinyLFUExport{
 		Freq:    NewCmSketchExport(p.freq),
@@ -565,6 +595,18 @@ func UnmarshalTinyLFU(b []byte) (*tinyLFU, error) {
 		incrs:   tLFU.Incrs,
 		resetAt: tLFU.ResetAt,
 	}, nil
+}
+
+func UnmarshalTinyLFUGreen(b []byte) (*tinyLFU, error) {
+	tLFU := &tinyLFU{}
+
+	buffer := bytes.NewBuffer(b)
+	err := msgp.Decode(buffer, tLFU)
+	if err != nil {
+		return nil, err
+	}
+
+	return tLFU, nil
 }
 
 func (p *tinyLFU) Push(keys []uint64) {

@@ -24,6 +24,8 @@ import (
 	"github.com/dustin/go-humanize"
 )
 
+//go:generate greenpack -unexported
+
 // Creates bounds for an histogram. The bounds are powers of two of the form
 // [2^min_exponent, ..., 2^max_exponent].
 func HistogramBounds(minExponent, maxExponent uint32) []float64 {
@@ -48,12 +50,12 @@ func Fibonacci(num int) []float64 {
 // HistogramData stores the information needed to represent the sizes of the keys and values
 // as a histogram.
 type HistogramData struct {
-	Bounds         []float64
-	Count          int64
-	CountPerBucket []int64
-	Min            int64
-	Max            int64
-	Sum            int64
+	Bounds         []float64 `zid:"0"`
+	Count          int64     `zid:"1"`
+	CountPerBucket []int64   `zid:"2"`
+	Min            int64     `zid:"3"`
+	Max            int64     `zid:"4"`
+	Sum            int64     `zid:"5"`
 }
 
 // NewHistogramData returns a new instance of HistogramData with properly initialized fields.

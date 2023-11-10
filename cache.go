@@ -35,6 +35,8 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
+//go:generate greenpack -unexported
+
 var (
 	// TODO: find the optimal value for this or make it configurable
 	setBufSize = 32 * 1024
@@ -49,39 +51,39 @@ const itemSize = int64(unsafe.Sizeof(storeItem{}))
 // from as many goroutines as you want.
 type Cache struct {
 	// store is the central concurrent hashmap where key-value items are stored.
-	store store
+	store store `zid:"0"`
 	// policy determines what gets let in to the cache and what gets kicked out.
-	policy policy
+	policy policy `zid:"1"`
 	// getBuf is a custom ring buffer implementation that gets pushed to when
 	// keys are read.
-	getBuf *ringBuffer
+	getBuf *ringBuffer `msg:"-"`
 	// setBuf is a buffer allowing us to batch/drop Sets during times of high
 	// contention.
-	setBuf chan *Item
+	setBuf chan *Item `msg:"-"`
 	// onEvict is called for item evictions.
-	onEvict itemCallback
+	onEvict itemCallback `msg:"-"`
 	// onReject is called when an item is rejected via admission policy.
-	onReject itemCallback
+	onReject itemCallback `msg:"-"`
 	// onExit is called whenever a value goes out of scope from the cache.
-	onExit (func(interface{}))
+	onExit (func(interface{})) `msg:"-"`
 	// KeyToHash function is used to customize the key hashing algorithm.
 	// Each key will be hashed using the provided function. If keyToHash value
 	// is not set, the default keyToHash function is used.
-	keyToHash func(interface{}) (uint64, uint64)
+	keyToHash func(interface{}) (uint64, uint64) `msg:"-"`
 	// stop is used to stop the processItems goroutine.
-	stop chan struct{}
+	stop chan struct{} `msg:"-"`
 	// indicates whether cache is closed.
-	isClosed bool
+	isClosed bool `msg:"-"`
 	// cost calculates cost from a value.
-	cost func(value interface{}) int64
+	cost func(value interface{}) int64 `msg:"-"`
 	// ignoreInternalCost dictates whether to ignore the cost of internally storing
 	// the item in the cost calculation.
-	ignoreInternalCost bool
+	ignoreInternalCost bool `msg:"-"`
 	// cleanupTicker is used to periodically check for entries whose TTL has passed.
-	cleanupTicker *time.Ticker
+	cleanupTicker *time.Ticker `msg:"-"`
 	// Metrics contains a running log of important statistics like hits, misses,
 	// and dropped items.
-	Metrics *Metrics
+	Metrics *Metrics `zid:"2"`
 }
 
 // Config is passed to NewCache for creating new Cache instances.
@@ -151,13 +153,13 @@ const (
 
 // Item is passed to setBuf so items can eventually be added to the cache.
 type Item struct {
-	flag       itemFlag
-	Key        uint64
-	Conflict   uint64
-	Value      interface{}
-	Cost       int64
-	Expiration time.Time
-	wg         *sync.WaitGroup
+	flag       itemFlag        `msg:"-"`
+	Key        uint64          `msg:"-"`
+	Conflict   uint64          `msg:"-"`
+	Value      interface{}     `msg:"-"`
+	Cost       int64           `msg:"-"`
+	Expiration time.Time       `msg:"-"`
+	wg         *sync.WaitGroup `msg:"-"`
 }
 
 // NewCache returns a new Cache instance and any configuration errors, if any.
@@ -681,10 +683,10 @@ func stringFor(t metricType) string {
 
 // Metrics is a snapshot of performance statistics for the lifetime of a cache instance.
 type Metrics struct {
-	all [doNotUse][]*uint64
+	all [doNotUse][]*uint64 `zid:"0"`
 
-	mu   sync.RWMutex
-	life *z.HistogramData // Tracks the life expectancy of a key.
+	mu   sync.RWMutex     `msg:"-"`
+	life *z.HistogramData `zid:"1"` // Tracks the life expectancy of a key.
 }
 
 func newMetrics() *Metrics {

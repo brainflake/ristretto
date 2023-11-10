@@ -17,11 +17,16 @@
 package ristretto
 
 import (
+	"bytes"
+	"github.com/vmihailenco/msgpack/v5"
+	"io"
 	"sync"
 	"time"
 
-	"github.com/vmihailenco/msgpack/v5"
+	"github.com/glycerine/greenpack/msgp"
 )
+
+//go:generate greenpack -unexported
 
 var (
 	// TODO: find the optimal value or make it configurable.
@@ -41,48 +46,200 @@ func cleanupBucket(t time.Time) int64 {
 // bucket type is a map of key to conflict.
 type bucket map[uint64]uint64
 
-// expirationMap is a map of bucket number to the corresponding bucket.
-type expirationMap struct {
-	sync.RWMutex
-	buckets map[int64]bucket
-}
+func DecodeMsgToBucket(dc *msgp.Reader) (bucket, error) {
+	var mapHeader uint32
+	var err error
 
-var _ msgpack.CustomDecoder = (*expirationMap)(nil)
+	mapHeader, err = dc.ReadMapHeader()
+	if err != nil {
+		return nil, err
+	}
 
-func (em *expirationMap) DecodeMsgpack(dec *msgpack.Decoder) error {
-	dec.SetMapDecoder(func(d *msgpack.Decoder) (interface{}, error) {
-		n, err := d.DecodeMapLen()
+	decodedBucket := make(map[uint64]uint64, mapHeader)
+
+	for i := mapHeader; i > 0; i-- {
+		key, err := dc.ReadUint64()
+		if err != nil {
+			return nil, err
+		}
+		val, err := dc.ReadUint64()
 		if err != nil {
 			return nil, err
 		}
 
-		m := make(map[int64]bucket)
-		for i := 0; i < n; i++ {
-			mk, err := d.DecodeInt64()
-			if err != nil {
-				return nil, err
-			}
+		decodedBucket[key] = val
+	}
 
-			mv, err := d.DecodeTypedMap()
-			if err != nil {
-				return nil, err
-			}
+	return decodedBucket, nil
+}
 
-			m[mk] = mv.(map[uint64]uint64)
-		}
+func (b bucket) DecodeMsg(dc *msgp.Reader) error {
+	var mapHeader uint32
+	var err error
 
-		return m, nil
-	})
-
-	out, err := dec.DecodeInterface()
+	mapHeader, err = dc.ReadMapHeader()
 	if err != nil {
 		return err
 	}
 
-	em.buckets = out.(map[int64]bucket)
+	decodedBucket := make(map[uint64]uint64, mapHeader)
 
-	return err
+	for i := mapHeader; i > 0; i-- {
+		key, err := dc.ReadUint64()
+		if err != nil {
+			return err
+		}
+		val, err := dc.ReadUint64()
+		if err != nil {
+			return err
+		}
+
+		decodedBucket[key] = val
+	}
+
+	return nil
 }
+
+func (b bucket) UnmarshalMsg(bts []byte) (o []byte, err error) {
+	var nbs msgp.NilBitsStack
+	nbs.Init(nil)
+	if msgp.IsNil(bts) {
+		bts = nbs.PushAlwaysNil(bts[1:])
+	}
+
+	var numEntries uint32
+
+	numEntries, bts, err = nbs.ReadMapHeaderBytes(bts)
+	if err != nil {
+		return
+	}
+
+	unmarshaledBucket := make(map[uint64]uint64, numEntries)
+
+	for i := numEntries; i > 0; i-- {
+		var key, val uint64
+
+		key, bts, err = nbs.ReadUint64Bytes(bts)
+		if err != nil {
+			return
+		}
+		val, bts, err = nbs.ReadUint64Bytes(bts)
+		if err != nil {
+			return
+		}
+
+		unmarshaledBucket[key] = val
+	}
+
+	o = bts
+
+	return
+}
+
+func (b bucket) EncodeMsg(mw *msgp.Writer) error {
+	var err error
+
+	err = mw.WriteMapHeader(uint32(len(b)))
+	if err != nil {
+		return err
+	}
+
+	for key, val := range b {
+		err = mw.WriteUint64(key)
+		if err != nil {
+			return err
+		}
+		err = mw.WriteUint64(val)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b bucket) MarshalMsg(bs []byte) (o []byte, err error) {
+	o = msgp.AppendMapHeader(o, uint32(len(b)))
+
+	for key, val := range b {
+		o = msgp.AppendUint64(o, key)
+		o = msgp.AppendUint64(o, val)
+	}
+
+	return
+}
+
+func (b bucket) Msgsize() int {
+	s := 1 + 18 + msgp.MapHeaderSize
+
+	// for each entry in b, we have 2 uint64 sizes
+	s += 2 * 8 * len(b)
+
+	return s
+}
+
+// expirationMap is a map of bucket number to the corresponding bucket.
+type expirationMap struct {
+	sync.RWMutex `msg:"-"`
+	buckets      map[int64]bucket `zid:"0"`
+}
+
+func (em *expirationMap) MarshalToBufferGreen(buffer io.Writer) error {
+	return msgp.Encode(buffer, em)
+}
+
+func (em *expirationMap) MarshalToBuffer(buffer io.Writer) error {
+	e := msgpack.NewEncoder(buffer)
+	return e.Encode(em)
+}
+
+func UnmarshalExpirationMap(b []byte) (*expirationMap, error) {
+	var em expirationMap
+	var buffer = bytes.NewBuffer(b)
+
+	err := msgp.Decode(buffer, &em)
+	if err != nil {
+		return nil, err
+	}
+
+	return &em, nil
+}
+
+//var _ msgpack.CustomDecoder = (*expirationMap)(nil)
+//
+//func (em *expirationMap) DecodeMsgpack(dec *msgpack.Decoder) error {
+//	dec.SetMapDecoder(func(d *msgpack.Decoder) (interface{}, error) {
+//		n, err := d.DecodeMapLen()
+//		if err != nil {
+//			return nil, err
+//		}
+//
+//		m := make(map[int64]bucket)
+//		for i := 0; i < n; i++ {
+//			mk, err := d.DecodeInt64()
+//			if err != nil {
+//				return nil, err
+//			}
+//
+//			mv, err := d.DecodeTypedMap()
+//			if err != nil {
+//				return nil, err
+//			}
+//
+//			m[mk] = mv.(map[uint64]uint64)
+//		}
+//
+//		return m, nil
+//	})
+//
+//	out, err := dec.DecodeInterface()
+//	if err != nil {
+//		return err
+//	}
+//
+//	em.buckets = out.(map[int64]bucket)
+//
+//	return err
+//}
 
 func newExpirationMap() *expirationMap {
 	return &expirationMap{

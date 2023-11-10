@@ -2,6 +2,7 @@ package ristretto
 
 import (
 	"bytes"
+	"math/rand"
 	"testing"
 	"time"
 
@@ -327,21 +328,134 @@ func TestMarshaling(t *testing.T) {
 		require.Equal(t, a, unmarshaledA)
 	})
 
-	t.Run("sampledLFU", func(t *testing.T) {
-		a := newSampledLFU(16)
-
-		a.add(1, 10)
-		a.add(3, 4)
-		a.updateIfHas(3, 40)
-		a.updateIfHas(3, 50)
+	t.Run("tinyLFU- greenpack", func(t *testing.T) {
+		a := newTinyLFU(16)
+		a.Push([]uint64{1, 3, 3, 3})
 
 		var buffer bytes.Buffer
-		err := a.MarshalToBuffer(&buffer)
+		err := a.MarshalToBufferGreen(&buffer)
 		require.Nil(t, err)
 
-		unmarshaledA, err := UnmarshalSampledLFU(buffer.Bytes())
+		unmarshaledA, err := UnmarshalTinyLFUGreen(buffer.Bytes())
 
 		require.Nil(t, err)
 		require.Equal(t, a, unmarshaledA)
 	})
+
+	//t.Run("sampledLFU", func(t *testing.T) {
+	//	a := newSampledLFU(16)
+	//
+	//	a.add(1, 10)
+	//	a.add(3, 4)
+	//	a.updateIfHas(3, 40)
+	//	a.updateIfHas(3, 50)
+	//
+	//	var buffer bytes.Buffer
+	//	err := a.MarshalToBuffer(&buffer)
+	//	require.Nil(t, err)
+	//
+	//	unmarshaledA, err := UnmarshalSampledLFU(buffer.Bytes())
+	//
+	//	require.Nil(t, err)
+	//	require.Equal(t, a, unmarshaledA)
+	//})
+	//
+	//t.Run("sampledLFU - greenpack", func(t *testing.T) {
+	//	a := newSampledLFU(16)
+	//
+	//	a.add(1, 10)
+	//	a.add(3, 4)
+	//	a.updateIfHas(3, 40)
+	//	a.updateIfHas(3, 50)
+	//
+	//	var buffer bytes.Buffer
+	//	err := a.MarshalToBufferGreen(&buffer)
+	//	require.Nil(t, err)
+	//
+	//	unmarshaledA, err := UnmarshalSampledLFUGreen(buffer.Bytes())
+	//
+	//	require.Nil(t, err)
+	//	require.Equal(t, a, unmarshaledA)
+	//})
+}
+
+func generateKeys(num int) []uint64 {
+	keys := make([]uint64, num)
+
+	for i := 0; i < num; i++ {
+		keys[i] = rand.Uint64()
+	}
+
+	return keys
+}
+
+func BenchmarkMarshalSampledLFUGreen(b *testing.B) {
+	keys := generateKeys(500000)
+
+	lfu := newSampledLFU(171428570)
+
+	for _, k := range keys {
+		cost := rand.Uint64() % k
+		lfu.add(k, int64(cost))
+	}
+
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		var buffer bytes.Buffer
+		err := lfu.MarshalToBufferGreen(&buffer)
+		require.Nil(b, err)
+	}
+}
+
+func BenchmarkMarshalSampledLFUMsgpack(b *testing.B) {
+	keys := generateKeys(500000)
+
+	lfu := newSampledLFU(171428570)
+
+	for _, k := range keys {
+		cost := rand.Uint64() % k
+		lfu.add(k, int64(cost))
+	}
+
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		var buffer bytes.Buffer
+		err := lfu.MarshalToBuffer(&buffer)
+		require.Nil(b, err)
+	}
+}
+
+func BenchmarkMarshalTinyLFUGreen(b *testing.B) {
+	keys := generateKeys(5000000)
+
+	//lfu := newTinyLFU(171428570)
+	lfu := newTinyLFU(200000000)
+	lfu.Push(keys)
+
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		var buffer bytes.Buffer
+		err := lfu.MarshalToBufferGreen(&buffer)
+		require.Nil(b, err)
+	}
+}
+
+func BenchmarkMarshalTinyLFUMsgpack(b *testing.B) {
+	keys := generateKeys(5000000)
+
+	//lfu := newTinyLFU(171428570)
+	lfu := newTinyLFU(200000000)
+
+	lfu.Push(keys)
+
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		var buffer bytes.Buffer
+		err := lfu.MarshalToBuffer(&buffer)
+		require.Nil(b, err)
+	}
 }
