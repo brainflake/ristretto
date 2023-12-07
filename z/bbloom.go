@@ -29,6 +29,8 @@ import (
 	"github.com/golang/glog"
 )
 
+//go:generate greenpack -unexported
+
 // helper
 var mask = []uint8{1, 2, 4, 8, 16, 32, 64, 128}
 
@@ -75,14 +77,45 @@ func NewBloomFilter(params ...float64) (bloomfilter *Bloom) {
 	return bloomfilter
 }
 
+type BloomExport struct {
+	Bitset  []uint64
+	ElemNum uint64
+	SizeExp uint64
+	Size    uint64
+	SetLocs uint64
+	Shift   uint64
+}
+
+func (b *BloomExport) ToBloom() *Bloom {
+	return &Bloom{
+		bitset:  b.Bitset,
+		ElemNum: b.ElemNum,
+		sizeExp: b.SizeExp,
+		size:    b.Size,
+		setLocs: b.SetLocs,
+		shift:   b.Shift,
+	}
+}
+
+func NewBloomExport(b *Bloom) *BloomExport {
+	return &BloomExport{
+		Bitset:  b.bitset,
+		ElemNum: b.ElemNum,
+		SizeExp: b.sizeExp,
+		Size:    b.size,
+		SetLocs: b.setLocs,
+		Shift:   b.shift,
+	}
+}
+
 // Bloom filter
 type Bloom struct {
-	bitset  []uint64
-	ElemNum uint64
-	sizeExp uint64
-	size    uint64
-	setLocs uint64
-	shift   uint64
+	bitset  []uint64 `zid:"0"`
+	ElemNum uint64   `zid:"1"`
+	sizeExp uint64   `zid:"2"`
+	size    uint64   `zid:"3"`
+	setLocs uint64   `zid:"4"`
+	shift   uint64   `zid:"5"`
 }
 
 // <--- http://www.cse.yorku.ca/~oz/hash.html
@@ -169,6 +202,7 @@ func (bl *Bloom) IsSet(idx uint64) bool {
 type bloomJSONImExport struct {
 	FilterSet []byte
 	SetLocs   uint64
+	ElemNum   uint64
 }
 
 // NewWithBoolset takes a []byte slice and number of locs per entry,
@@ -181,23 +215,28 @@ func newWithBoolset(bs *[]byte, locs uint64) *Bloom {
 	return bloomfilter
 }
 
-// JSONUnmarshal takes JSON-Object (type bloomJSONImExport) as []bytes
+// UnmarshalJSON takes JSON-Object (type bloomJSONImExport) as []bytes
 // returns bloom32 / bloom64 object.
-func JSONUnmarshal(dbData []byte) (*Bloom, error) {
+func (bl *Bloom) UnmarshalJSON(dbData []byte) error {
 	bloomImEx := bloomJSONImExport{}
 	if err := json.Unmarshal(dbData, &bloomImEx); err != nil {
-		return nil, err
+		return err
 	}
 	buf := bytes.NewBuffer(bloomImEx.FilterSet)
 	bs := buf.Bytes()
-	bf := newWithBoolset(&bs, bloomImEx.SetLocs)
-	return bf, nil
+
+	newBF := newWithBoolset(&bs, bloomImEx.SetLocs)
+	newBF.ElemNum = bloomImEx.ElemNum
+	*bl = *newBF
+	return nil
 }
 
-// JSONMarshal returns JSON-object (type bloomJSONImExport) as []byte.
-func (bl Bloom) JSONMarshal() []byte {
+// MarshalJSON returns JSON-object (type bloomJSONImExport) as []byte.
+func (bl *Bloom) MarshalJSON() ([]byte, error) {
+	glog.Info("MarshalJSON")
 	bloomImEx := bloomJSONImExport{}
 	bloomImEx.SetLocs = bl.setLocs
+	bloomImEx.ElemNum = bl.ElemNum
 	bloomImEx.FilterSet = make([]byte, len(bl.bitset)<<3)
 	for i := range bloomImEx.FilterSet {
 		bloomImEx.FilterSet[i] = *(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(&bl.bitset[0])) +
@@ -207,5 +246,5 @@ func (bl Bloom) JSONMarshal() []byte {
 	if err != nil {
 		glog.Fatal("json.Marshal failed: ", err)
 	}
-	return data
+	return data, err
 }

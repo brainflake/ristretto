@@ -5,7 +5,7 @@ package main
 import (
 	"unsafe"
 
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/brainflake/ristretto/z"
 )
 
 // Defined in node.go.

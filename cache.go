@@ -23,13 +23,19 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
 
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/brainflake/ristretto/z"
+	"github.com/vmihailenco/msgpack/v5"
 )
+
+//go:generate greenpack -unexported
 
 var (
 	// TODO: find the optimal value for this or make it configurable
@@ -45,39 +51,39 @@ const itemSize = int64(unsafe.Sizeof(storeItem{}))
 // from as many goroutines as you want.
 type Cache struct {
 	// store is the central concurrent hashmap where key-value items are stored.
-	store store
+	store store `zid:"0"`
 	// policy determines what gets let in to the cache and what gets kicked out.
-	policy policy
+	policy policy `zid:"1"`
 	// getBuf is a custom ring buffer implementation that gets pushed to when
 	// keys are read.
-	getBuf *ringBuffer
+	getBuf *ringBuffer `msg:"-"`
 	// setBuf is a buffer allowing us to batch/drop Sets during times of high
 	// contention.
-	setBuf chan *Item
+	setBuf chan *Item `msg:"-"`
 	// onEvict is called for item evictions.
-	onEvict itemCallback
+	onEvict itemCallback `msg:"-"`
 	// onReject is called when an item is rejected via admission policy.
-	onReject itemCallback
+	onReject itemCallback `msg:"-"`
 	// onExit is called whenever a value goes out of scope from the cache.
-	onExit (func(interface{}))
+	onExit (func(interface{})) `msg:"-"`
 	// KeyToHash function is used to customize the key hashing algorithm.
 	// Each key will be hashed using the provided function. If keyToHash value
 	// is not set, the default keyToHash function is used.
-	keyToHash func(interface{}) (uint64, uint64)
+	keyToHash func(interface{}) (uint64, uint64) `msg:"-"`
 	// stop is used to stop the processItems goroutine.
-	stop chan struct{}
+	stop chan struct{} `msg:"-"`
 	// indicates whether cache is closed.
-	isClosed bool
+	isClosed bool `msg:"-"`
 	// cost calculates cost from a value.
-	cost func(value interface{}) int64
+	cost func(value interface{}) int64 `msg:"-"`
 	// ignoreInternalCost dictates whether to ignore the cost of internally storing
 	// the item in the cost calculation.
-	ignoreInternalCost bool
+	ignoreInternalCost bool `msg:"-"`
 	// cleanupTicker is used to periodically check for entries whose TTL has passed.
-	cleanupTicker *time.Ticker
+	cleanupTicker *time.Ticker `msg:"-"`
 	// Metrics contains a running log of important statistics like hits, misses,
 	// and dropped items.
-	Metrics *Metrics
+	Metrics *Metrics `zid:"2"`
 }
 
 // Config is passed to NewCache for creating new Cache instances.
@@ -147,13 +153,13 @@ const (
 
 // Item is passed to setBuf so items can eventually be added to the cache.
 type Item struct {
-	flag       itemFlag
-	Key        uint64
-	Conflict   uint64
-	Value      interface{}
-	Cost       int64
-	Expiration time.Time
-	wg         *sync.WaitGroup
+	flag       itemFlag        `msg:"-"`
+	Key        uint64          `msg:"-"`
+	Conflict   uint64          `msg:"-"`
+	Value      interface{}     `msg:"-"`
+	Cost       int64           `msg:"-"`
+	Expiration time.Time       `msg:"-"`
+	wg         *sync.WaitGroup `msg:"-"`
 }
 
 // NewCache returns a new Cache instance and any configuration errors, if any.
@@ -206,6 +212,111 @@ func NewCache(config *Config) (*Cache, error) {
 	//       usually be sufficient
 	go cache.processItems()
 	return cache, nil
+}
+
+func NewCacheFromSnapshot(dir string, config *Config, itemType interface{}) (*Cache, error) {
+	var err error
+	var dirInfo os.FileInfo
+
+	// check that dir exists
+	if dirInfo, err = os.Stat(dir); os.IsNotExist(err) {
+		return nil, err
+	}
+	if !dirInfo.IsDir() {
+		return nil, errors.New("snapshot path is not a directory")
+	}
+
+	switch {
+	case config.BufferItems == 0:
+		return nil, errors.New("BufferItems can't be zero")
+	}
+
+	policy, err := newDefaultPolicyFromSnapshot(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	store, err := newStoreFromSnapshot(dir, itemType)
+	if err != nil {
+		return nil, err
+	}
+
+	cache := &Cache{
+		store:              store,
+		policy:             policy,
+		getBuf:             newRingBuffer(policy, config.BufferItems),
+		setBuf:             make(chan *Item, setBufSize),
+		keyToHash:          config.KeyToHash,
+		stop:               make(chan struct{}),
+		cost:               config.Cost,
+		ignoreInternalCost: config.IgnoreInternalCost,
+		cleanupTicker:      time.NewTicker(time.Duration(bucketDurationSecs) * time.Second / 2),
+	}
+	cache.onExit = func(val interface{}) {
+		if config.OnExit != nil && val != nil {
+			config.OnExit(val)
+		}
+	}
+	cache.onEvict = func(item *Item) {
+		if config.OnEvict != nil {
+			config.OnEvict(item)
+		}
+		cache.onExit(item.Value)
+	}
+	cache.onReject = func(item *Item) {
+		if config.OnReject != nil {
+			config.OnReject(item)
+		}
+		cache.onExit(item.Value)
+	}
+	if cache.keyToHash == nil {
+		cache.keyToHash = z.KeyToHash
+	}
+	if config.Metrics {
+		err = cache.collectMetricsFromSnapshot(dir)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// NOTE: benchmarks seem to show that performance decreases the more
+	//       goroutines we have running cache.processItems(), so 1 should
+	//       usually be sufficient
+	go cache.processItems()
+	return cache, nil
+}
+
+// Snapshot creates a snapshot of the state of the cache
+// Note: we do this with minimal locking for performance reasons. Namely
+// we do not attempt to form a proper point-in-time view of the LFU structures,
+// metrics and sharded map data, preferring a "best effort" export of the data and
+// allowing for some drift in the admission/eviction policy structures and metrics.
+func (c *Cache) Snapshot(dir string) error {
+	var err error
+	var dirInfo os.FileInfo
+
+	// check that dir exists and is writable
+	if dirInfo, err = os.Stat(dir); os.IsNotExist(err) {
+		return err
+	}
+	if !dirInfo.IsDir() {
+		return errors.New("snapshot path is not a directory")
+	}
+
+	// snapshot policy
+	err = c.policy.Snapshot(dir)
+	if err != nil {
+		return err
+	}
+
+	// snapshot cache metrics (if metrics are enabled)
+	if c.Metrics != nil {
+		err = c.Metrics.Snapshot(dir)
+		if err != nil {
+			return err
+		}
+	}
+
+	return c.store.Snapshot(dir)
 }
 
 // Wait blocks until all buffered writes have been applied. This ensures a call to Set()
@@ -504,6 +615,19 @@ func (c *Cache) collectMetrics() {
 	c.policy.CollectMetrics(c.Metrics)
 }
 
+func (c *Cache) collectMetricsFromSnapshot(dir string) error {
+	var err error
+
+	c.Metrics, err = newMetricsFromSnapshot(dir)
+	if err != nil {
+		return err
+	}
+
+	c.policy.CollectMetrics(c.Metrics)
+
+	return nil
+}
+
 type metricType int
 
 const (
@@ -559,10 +683,10 @@ func stringFor(t metricType) string {
 
 // Metrics is a snapshot of performance statistics for the lifetime of a cache instance.
 type Metrics struct {
-	all [doNotUse][]*uint64
+	all [doNotUse][]*uint64 `zid:"0"`
 
-	mu   sync.RWMutex
-	life *z.HistogramData // Tracks the life expectancy of a key.
+	mu   sync.RWMutex     `msg:"-"`
+	life *z.HistogramData `zid:"1"` // Tracks the life expectancy of a key.
 }
 
 func newMetrics() *Metrics {
@@ -577,6 +701,81 @@ func newMetrics() *Metrics {
 		}
 	}
 	return s
+}
+
+type MetricsExport struct {
+	All  [doNotUse][]*uint64
+	Life *z.HistogramData
+}
+
+func (p *Metrics) Snapshot(dir string) error {
+	var err error
+
+	metricsBuffer, err := z.NewBufferPersistent(filepath.Join(dir, metricsFilename), 0)
+	if err != nil {
+		return err
+	}
+	defer metricsBuffer.Release()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	err = p.MarshalToBuffer(metricsBuffer)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (p *Metrics) MarshalToBuffer(buffer io.Writer) error {
+	export := MetricsExport{
+		All:  p.all,
+		Life: p.life,
+	}
+
+	e := msgpack.NewEncoder(buffer)
+	return e.Encode(export)
+}
+
+func newMetricsFromSnapshot(dir string) (*Metrics, error) {
+	var err error
+
+	metricsFile := filepath.Join(dir, metricsFilename)
+	if _, err = os.Stat(metricsFile); os.IsNotExist(err) {
+		return nil, err
+	}
+
+	f, err := os.Open(metricsFile)
+	if err != nil {
+		return nil, err
+	}
+
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	buf, err := z.NewReadBuffer(f, int(stat.Size()))
+	if err != nil {
+		return nil, err
+	}
+
+	return UnmarshalMetrics(buf.Bytes())
+}
+
+func UnmarshalMetrics(b []byte) (*Metrics, error) {
+	exportedMetrics := &MetricsExport{}
+
+	err := msgpack.Unmarshal(b, exportedMetrics)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Metrics{
+		all:  exportedMetrics.All,
+		life: exportedMetrics.Life,
+	}, nil
 }
 
 func (p *Metrics) add(t metricType, hash, delta uint64) {

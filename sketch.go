@@ -30,14 +30,16 @@ import (
 	"time"
 )
 
+//go:generate greenpack -unexported
+
 // cmSketch is a Count-Min sketch implementation with 4-bit counters, heavily
 // based on Damian Gryski's CM4 [1].
 //
 // [1]: https://github.com/dgryski/go-tinylfu/blob/master/cm4.go
 type cmSketch struct {
-	rows [cmDepth]cmRow
-	seed [cmDepth]uint64
-	mask uint64
+	rows [cmDepth]cmRow  `zid:"0"`
+	seed [cmDepth]uint64 `zid:"1"`
+	mask uint64          `zid:"2"`
 }
 
 const (
@@ -60,6 +62,28 @@ func newCmSketch(numCounters int64) *cmSketch {
 		sketch.rows[i] = newCmRow(numCounters)
 	}
 	return sketch
+}
+
+type cmSketchExport struct {
+	Rows [cmDepth]cmRow
+	Seed [cmDepth]uint64
+	Mask uint64
+}
+
+func NewCmSketchExport(sketch *cmSketch) *cmSketchExport {
+	return &cmSketchExport{
+		Rows: sketch.rows,
+		Seed: sketch.seed,
+		Mask: sketch.mask,
+	}
+}
+
+func (se *cmSketchExport) ToCmSketch() *cmSketch {
+	return &cmSketch{
+		rows: se.Rows,
+		seed: se.Seed,
+		mask: se.Mask,
+	}
 }
 
 // Increment increments the count(ers) for the specified key.

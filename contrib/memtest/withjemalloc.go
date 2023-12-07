@@ -3,7 +3,7 @@
 package main
 
 import (
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/brainflake/ristretto/z"
 	"github.com/golang/glog"
 )
 
