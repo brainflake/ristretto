@@ -17,8 +17,25 @@
 package ristretto
 
 import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
+
+	"github.com/brainflake/ristretto/z"
+	msgpack "github.com/vmihailenco/msgpack/v5"
+	"golang.org/x/sync/errgroup"
+)
+
+const (
+	shardFilenameTemplate = "shard_%d.msgpack"
+	expirationMapFilename = "expirations.msgpack"
+	metricsFilename       = "metrics.msgpack"
 )
 
 // TODO: Do we need this to be a separate struct from Item?
@@ -27,6 +44,23 @@ type storeItem struct {
 	conflict   uint64
 	value      interface{}
 	expiration time.Time
+}
+
+func init() {
+	storeItemEncoder := func(enc *msgpack.Encoder, val reflect.Value) error {
+		s := val.Interface().(storeItem)
+
+		return enc.EncodeMulti(s.key, s.conflict, s.value, s.expiration)
+	}
+
+	// Note: if storing a non-primitive type this will be overridden
+	// Also ensure your type satisfies the msgpack.CustomDecoder + msgpack.CustomEncoder
+	// interfaces
+	storeItemDecoder := func(dec *msgpack.Decoder, val reflect.Value) error {
+		return dec.Decode(val)
+	}
+
+	msgpack.Register(storeItem{}, storeItemEncoder, storeItemDecoder)
 }
 
 // store is the interface fulfilled by all hash map implementations in this
@@ -53,11 +87,18 @@ type store interface {
 	Cleanup(policy policy, onEvict itemCallback)
 	// Clear clears all contents of the store.
 	Clear(onEvict itemCallback)
+	// Snapshot will create a point-in-time snapshot of the cache
+	Snapshot(path string) error
 }
 
 // newStore returns the default store implementation.
 func newStore() store {
 	return newShardedMap()
+}
+
+// newStoreFromSnapshot returns a new store from a stored snapshot
+func newStoreFromSnapshot(dir string, itemType interface{}) (store, error) {
+	return newShardedMapFromSnapshot(dir, itemType)
 }
 
 const numShards uint64 = 256
@@ -76,6 +117,83 @@ func newShardedMap() *shardedMap {
 		sm.shards[i] = newLockedMap(sm.expiryMap)
 	}
 	return sm
+}
+
+func UnmarshalExpirationMap(b []byte) (*expirationMap, error) {
+	var em expirationMap
+
+	err := msgpack.Unmarshal(b, &em)
+	if err != nil {
+		return nil, err
+	}
+
+	return &em, nil
+}
+
+func newShardedMapFromSnapshot(path string, itemType interface{}) (*shardedMap, error) {
+	sm := &shardedMap{
+		shards: make([]*lockedMap, int(numShards)),
+	}
+
+	// TODO: process interim expirations that would have happened since the snapshot
+	file, err := os.Open(filepath.Join(path, expirationMapFilename))
+	defer file.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	stat, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	buffer, err := z.NewReadBuffer(file, int(stat.Size()))
+	if err != nil {
+		return nil, err
+	}
+
+	sm.expiryMap, err = UnmarshalExpirationMap(buffer.Bytes())
+	if err != nil {
+		return nil, err
+	}
+
+	var errGrp errgroup.Group
+
+	for i := range sm.shards {
+		i := i
+		errGrp.Go(func() error {
+			shardFile := fmt.Sprintf(shardFilenameTemplate, i)
+			file, err := os.Open(filepath.Join(path, shardFile))
+			defer file.Close()
+
+			if err != nil {
+				return err
+			}
+
+			stat, err := file.Stat()
+			if err != nil {
+				return err
+			}
+
+			buffer, err := z.NewReadBuffer(file, int(stat.Size()))
+			if err != nil {
+				return err
+			}
+
+			sm.shards[i], err = newLockedMapFromSnapshot(sm.expiryMap, buffer.Bytes(), itemType)
+			if err != nil {
+				return err
+			}
+
+			return nil
+		})
+	}
+
+	if err := errGrp.Wait(); err != nil {
+		return nil, err
+	}
+
+	return sm, nil
 }
 
 func (sm *shardedMap) Get(key, conflict uint64) (interface{}, bool) {
@@ -113,6 +231,44 @@ func (sm *shardedMap) Clear(onEvict itemCallback) {
 	}
 }
 
+func (sm *shardedMap) Snapshot(dir string) error {
+	var err error
+
+	var expiryBuffer *z.Buffer
+	expiryBuffer, err = z.NewBufferPersistent(filepath.Join(dir, expirationMapFilename), 0)
+	if err != nil {
+		return err
+	}
+	defer expiryBuffer.Release()
+
+	e := msgpack.NewEncoder(expiryBuffer)
+
+	err = e.Encode(sm.expiryMap)
+	if err != nil {
+		return err
+	}
+
+	// Note these are done serially here so as not to read lock all of the shards at once, although this may
+	// not be a concern
+	for idx, data := range sm.shards {
+		var dataBuffer *z.Buffer
+
+		dataBuffer, err = z.NewBufferPersistent(filepath.Join(dir, fmt.Sprintf(shardFilenameTemplate, idx)), 0)
+		if err != nil {
+			return err
+		}
+
+		err = data.marshalToBuffer(dataBuffer)
+		dataBuffer.Release() // ensure we release the buffer regardless of error status
+		if err != nil {
+			// fail if there's a single error
+			return err
+		}
+	}
+
+	return nil
+}
+
 type lockedMap struct {
 	sync.RWMutex
 	data map[uint64]storeItem
@@ -124,6 +280,90 @@ func newLockedMap(em *expirationMap) *lockedMap {
 		data: make(map[uint64]storeItem),
 		em:   em,
 	}
+}
+
+func newLockedMapFromSnapshot(em *expirationMap, buf []byte, itemType interface{}) (*lockedMap, error) {
+	lockedMap, err := UnmarshalLockedMap(buf, itemType)
+	if err != nil {
+		return nil, err
+	}
+
+	lockedMap.em = em
+
+	return lockedMap, nil
+}
+
+func (m *lockedMap) marshalToBuffer(buffer io.Writer) error {
+	m.RLock()
+	defer m.RUnlock()
+
+	e := msgpack.NewEncoder(buffer)
+
+	return e.Encode(m.data)
+}
+
+func UnmarshalLockedMap(b []byte, itemType interface{}) (*lockedMap, error) {
+	lockedMap := &lockedMap{}
+
+	var data map[uint64]storeItem
+
+	if len(b) > 1 {
+		var size uint64
+
+		// We want to pre-size the map to avoid unnecessary allocations.
+		// The map size is available in the first few bytes of the msgpack format.
+		// see https://github.com/msgpack/msgpack/blob/master/spec.md#map-format-family
+		if b[0]&0xf0 == 0x80 {
+			sizeByte := []byte{b[0] & 0x0f}
+			size, _ = binary.ReadUvarint(bytes.NewBuffer(sizeByte))
+		} else if b[0] == 0xde {
+			size = uint64(binary.BigEndian.Uint16(b[1:3]))
+		} else if b[0] == 0xdf {
+			size = uint64(binary.BigEndian.Uint32(b[1:5]))
+		}
+
+		data = make(map[uint64]storeItem, size)
+
+		dec := msgpack.NewDecoder(bytes.NewBuffer(b))
+
+		// If an itemType is passed in set up a decoder for it (used when storing structs as the item)
+		if itemType != nil {
+			storeItemEncoder := func(enc *msgpack.Encoder, val reflect.Value) error {
+				s := val.Interface().(storeItem)
+
+				return enc.EncodeMulti(s.key, s.conflict, s.value, s.expiration)
+			}
+
+			storeItemDecoder := func(dec *msgpack.Decoder, val reflect.Value) error {
+				ptr := val.Addr().UnsafePointer()
+
+				s := (*storeItem)(ptr)
+
+				dec.DecodeMulti(&s.key, &s.conflict)
+
+				ss := reflect.New(reflect.TypeOf(itemType))
+				decodefn := ss.MethodByName("DecodeMsgpack")
+
+				// TODO: check for return err here
+				decodefn.Call([]reflect.Value{reflect.ValueOf(dec)})
+
+				s.value = ss.Interface()
+
+				return dec.Decode(&s.expiration)
+			}
+
+			msgpack.Register(storeItem{}, storeItemEncoder, storeItemDecoder)
+		}
+
+		err := dec.Decode(&data)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	lockedMap.data = data
+
+	return lockedMap, nil
 }
 
 func (m *lockedMap) get(key, conflict uint64) (interface{}, bool) {

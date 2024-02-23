@@ -17,23 +17,31 @@
 package ristretto
 
 import (
+	"io"
 	"math"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/brainflake/ristretto/z"
+	msgpack "github.com/vmihailenco/msgpack/v5"
 )
 
 const (
 	// lfuSample is the number of items to sample when looking at eviction
 	// candidates. 5 seems to be the most optimal number [citation needed].
 	lfuSample = 5
+
+	admissionLFUFilename = "admission_policy.msgpack"
+	evictionLFUFilename  = "eviction_policy.msgpack"
 )
 
 // policy is the interface encapsulating eviction/admission behavior.
 //
 // TODO: remove this interface and just rename defaultPolicy to policy, as we
-//       are probably only going to use/implement/maintain one policy.
+//
+//	are probably only going to use/implement/maintain one policy.
 type policy interface {
 	ringConsumer
 	// Add attempts to Add the key-cost pair to the Policy. It returns a slice
@@ -60,10 +68,46 @@ type policy interface {
 	MaxCost() int64
 	// UpdateMaxCost updates the max cost of the cache policy.
 	UpdateMaxCost(int64)
+	// Snapshot will generate a snapshot of the LFU structures
+	Snapshot(string) error
 }
 
 func newPolicy(numCounters, maxCost int64) policy {
 	return newDefaultPolicy(numCounters, maxCost)
+}
+
+func newDefaultPolicyFromSnapshot(dir string) (policy, error) {
+	var err error
+
+	admissionPolicyFile := filepath.Join(dir, admissionLFUFilename)
+	if _, err = os.Stat(admissionPolicyFile); os.IsNotExist(err) {
+		return nil, err
+	}
+
+	evictionPolicyFile := filepath.Join(dir, evictionLFUFilename)
+	if _, err = os.Stat(evictionPolicyFile); os.IsNotExist(err) {
+		return nil, err
+	}
+
+	admit, err := newTinyLFUFromSnapshot(admissionPolicyFile)
+	if err != nil {
+		return nil, err
+	}
+
+	evict, err := newSampledLFUFromSnapshot(evictionPolicyFile)
+	if err != nil {
+		return nil, err
+	}
+
+	p := &defaultPolicy{
+		admit:   admit,
+		evict:   evict,
+		itemsCh: make(chan []uint64, 3),
+		stop:    make(chan struct{}),
+	}
+
+	go p.processItems()
+	return p, nil
 }
 
 type defaultPolicy struct {
@@ -85,6 +129,38 @@ func newDefaultPolicy(numCounters, maxCost int64) *defaultPolicy {
 	}
 	go p.processItems()
 	return p
+}
+
+// Snapshot generates a snapshot of the policy and stores it in path
+func (p *defaultPolicy) Snapshot(dir string) error {
+	var err error
+
+	admissionPolicyBuffer, err := z.NewBufferPersistent(filepath.Join(dir, admissionLFUFilename), 0)
+	if err != nil {
+		return err
+	}
+	defer admissionPolicyBuffer.Release()
+
+	evictionPolicyBuffer, err := z.NewBufferPersistent(filepath.Join(dir, evictionLFUFilename), 0)
+	if err != nil {
+		return err
+	}
+	defer evictionPolicyBuffer.Release()
+
+	p.Lock()
+	defer p.Unlock()
+
+	err = p.admit.MarshalToBuffer(admissionPolicyBuffer)
+	if err != nil {
+		return err
+	}
+
+	err = p.evict.MarshalToBuffer(evictionPolicyBuffer)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (p *defaultPolicy) CollectMetrics(metrics *Metrics) {
@@ -277,6 +353,12 @@ func (p *defaultPolicy) UpdateMaxCost(maxCost int64) {
 	p.evict.updateMaxCost(maxCost)
 }
 
+type sampledLFUExport struct {
+	MaxCost  int64
+	Used     int64
+	KeyCosts map[uint64]int64
+}
+
 // sampledLFU is an eviction helper storing key-cost pairs.
 type sampledLFU struct {
 	// NOTE: align maxCost to 64-bit boundary for use with atomic.
@@ -296,6 +378,54 @@ func newSampledLFU(maxCost int64) *sampledLFU {
 		keyCosts: make(map[uint64]int64),
 		maxCost:  maxCost,
 	}
+}
+
+func newSampledLFUFromSnapshot(file string) (*sampledLFU, error) {
+	var err error
+
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	buf, err := z.NewReadBuffer(f, int(stat.Size()))
+	if err != nil {
+		return nil, err
+	}
+
+	return UnmarshalSampledLFU(buf.Bytes())
+}
+
+func (p *sampledLFU) MarshalToBuffer(buffer io.Writer) error {
+	export := sampledLFUExport{
+		MaxCost:  p.maxCost,
+		Used:     p.used,
+		KeyCosts: p.keyCosts,
+	}
+
+	e := msgpack.NewEncoder(buffer)
+
+	return e.Encode(export)
+}
+
+func UnmarshalSampledLFU(b []byte) (*sampledLFU, error) {
+	sLFU := &sampledLFUExport{}
+
+	err := msgpack.Unmarshal(b, sLFU)
+	if err != nil {
+		return nil, err
+	}
+
+	return &sampledLFU{
+		maxCost:  sLFU.MaxCost,
+		used:     sLFU.Used,
+		keyCosts: sLFU.KeyCosts,
+	}, nil
 }
 
 func (p *sampledLFU) getMaxCost() int64 {
@@ -363,6 +493,13 @@ func (p *sampledLFU) clear() {
 	p.keyCosts = make(map[uint64]int64)
 }
 
+type tinyLFUExport struct {
+	Freq    *cmSketchExport
+	Door    *z.BloomExport
+	Incrs   int64
+	ResetAt int64
+}
+
 // tinyLFU is an admission helper that keeps track of access frequency using
 // tiny (4-bit) counters in the form of a count-min sketch.
 // tinyLFU is NOT thread safe.
@@ -379,6 +516,55 @@ func newTinyLFU(numCounters int64) *tinyLFU {
 		door:    z.NewBloomFilter(float64(numCounters), 0.01),
 		resetAt: numCounters,
 	}
+}
+
+func newTinyLFUFromSnapshot(file string) (*tinyLFU, error) {
+	var err error
+
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	buf, err := z.NewReadBuffer(f, int(stat.Size()))
+	if err != nil {
+		return nil, err
+	}
+
+	return UnmarshalTinyLFU(buf.Bytes())
+}
+
+func (p *tinyLFU) MarshalToBuffer(buffer io.Writer) error {
+	export := tinyLFUExport{
+		Freq:    NewCmSketchExport(p.freq),
+		Door:    z.NewBloomExport(p.door),
+		Incrs:   p.incrs,
+		ResetAt: p.resetAt,
+	}
+
+	e := msgpack.NewEncoder(buffer)
+	return e.Encode(export)
+}
+
+func UnmarshalTinyLFU(b []byte) (*tinyLFU, error) {
+	tLFU := &tinyLFUExport{}
+
+	err := msgpack.Unmarshal(b, tLFU)
+	if err != nil {
+		return nil, err
+	}
+
+	return &tinyLFU{
+		freq:    tLFU.Freq.ToCmSketch(),
+		door:    tLFU.Door.ToBloom(),
+		incrs:   tLFU.Incrs,
+		resetAt: tLFU.ResetAt,
+	}, nil
 }
 
 func (p *tinyLFU) Push(keys []uint64) {

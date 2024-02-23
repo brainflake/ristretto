@@ -1,6 +1,7 @@
 package ristretto
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -78,6 +79,59 @@ func TestPolicyAdd(t *testing.T) {
 	victims, added = p.Add(4, 20)
 	require.NotNil(t, victims)
 	require.False(t, added)
+}
+
+func TestPolicySnapshot(t *testing.T) {
+	p := newDefaultPolicy(1000, 100)
+	if victims, added := p.Add(1, 101); victims != nil || added {
+		t.Fatal("can't add an item bigger than entire cache")
+	}
+	p.Lock()
+	p.evict.add(1, 1)
+	p.admit.Increment(1)
+	p.admit.Increment(2)
+	p.admit.Increment(3)
+	p.Unlock()
+
+	victims, added := p.Add(1, 1)
+	require.Nil(t, victims)
+	require.False(t, added)
+
+	victims, added = p.Add(2, 20)
+	require.Nil(t, victims)
+	require.True(t, added)
+
+	victims, added = p.Add(3, 90)
+	require.NotNil(t, victims)
+	require.True(t, added)
+
+	victims, added = p.Add(4, 20)
+	require.NotNil(t, victims)
+	require.False(t, added)
+
+	// create admission/eviction writers
+	var admissionWriter, evictionWriter bytes.Buffer
+	err := p.admit.MarshalToBuffer(&admissionWriter)
+	require.Nil(t, err)
+	err = p.evict.MarshalToBuffer(&evictionWriter)
+	require.Nil(t, err)
+
+	unmarshaledAdmission, err := UnmarshalTinyLFU(admissionWriter.Bytes())
+	require.Nil(t, err)
+
+	unmarshaledEviction, err := UnmarshalSampledLFU(evictionWriter.Bytes())
+	require.Nil(t, err)
+
+	p2 := defaultPolicy{
+		admit:   unmarshaledAdmission,
+		evict:   unmarshaledEviction,
+		itemsCh: make(chan []uint64, 3),
+		stop:    make(chan struct{}),
+	}
+
+	require.NotNil(t, p2)
+	require.Equal(t, p.admit, p2.admit)
+	require.Equal(t, p.evict, p2.evict)
 }
 
 func TestPolicyHas(t *testing.T) {
@@ -256,4 +310,38 @@ func TestTinyLFUClear(t *testing.T) {
 	a.clear()
 	require.Equal(t, int64(0), a.incrs)
 	require.Equal(t, int64(0), a.Estimate(3))
+}
+
+func TestMarshaling(t *testing.T) {
+	t.Run("tinyLFU", func(t *testing.T) {
+		a := newTinyLFU(16)
+		a.Push([]uint64{1, 3, 3, 3})
+
+		var buffer bytes.Buffer
+		err := a.MarshalToBuffer(&buffer)
+		require.Nil(t, err)
+
+		unmarshaledA, err := UnmarshalTinyLFU(buffer.Bytes())
+
+		require.Nil(t, err)
+		require.Equal(t, a, unmarshaledA)
+	})
+
+	t.Run("sampledLFU", func(t *testing.T) {
+		a := newSampledLFU(16)
+
+		a.add(1, 10)
+		a.add(3, 4)
+		a.updateIfHas(3, 40)
+		a.updateIfHas(3, 50)
+
+		var buffer bytes.Buffer
+		err := a.MarshalToBuffer(&buffer)
+		require.Nil(t, err)
+
+		unmarshaledA, err := UnmarshalSampledLFU(buffer.Bytes())
+
+		require.Nil(t, err)
+		require.Equal(t, a, unmarshaledA)
+	})
 }

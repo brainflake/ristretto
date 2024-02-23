@@ -1,10 +1,13 @@
 package ristretto
 
 import (
+	"bytes"
+	"github.com/vmihailenco/msgpack/v5"
+	"io"
 	"testing"
 	"time"
 
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/brainflake/ristretto/z"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,6 +40,126 @@ func TestStoreSetGet(t *testing.T) {
 	val, ok = s.Get(key, conflict)
 	require.True(t, ok)
 	require.Equal(t, 2, val.(int))
+}
+
+func TestMsgPackStoreItem(t *testing.T) {
+	t.Skip()
+	map1 := make(map[uint64]storeItem)
+
+	item1 := storeItem{
+		key:        uint64(34),
+		conflict:   uint64(4),
+		value:      int8(3),
+		expiration: time.Now(),
+	}
+
+	map1[63] = item1
+
+	map2 := make(map[uint64]storeItem)
+	//var item2 storeItem
+
+	marshaledMap1, err := msgpack.Marshal(&map1)
+	require.Nil(t, err)
+
+	msgpack.Unmarshal(marshaledMap1, &map2)
+
+	require.Equal(t, len(map1), len(map2))
+	require.Equal(t, map1[63].key, map2[63].key)
+	require.Equal(t, map1[63].conflict, map2[63].conflict)
+	require.Equal(t, map1[63].value, map2[63].value)
+	require.True(t, map1[63].expiration.Equal(map2[63].expiration))
+}
+
+func TestStoreSnapshot(t *testing.T) {
+	t.Skip()
+
+	s := newShardedMap()
+	key, conflict := z.KeyToHash(1)
+	i := Item{
+		Key:      key,
+		Conflict: conflict,
+		Value:    2,
+	}
+	s.Set(&i)
+	val, ok := s.Get(key, conflict)
+	require.True(t, ok)
+	require.Equal(t, 2, val.(int))
+
+	i.Value = 3
+	s.Set(&i)
+	val, ok = s.Get(key, conflict)
+	require.True(t, ok)
+	require.Equal(t, 3, val.(int))
+
+	key, conflict = z.KeyToHash(2)
+	i = Item{
+		Key:      key,
+		Conflict: conflict,
+		Value:    2,
+	}
+	s.Set(&i)
+	val, ok = s.Get(key, conflict)
+	require.True(t, ok)
+	require.Equal(t, 2, val.(int))
+
+	writers := make([]io.Writer, numShards)
+	for idx := range writers {
+		buffer := &bytes.Buffer{}
+		s.shards[idx].marshalToBuffer(buffer)
+		writers[idx] = buffer
+
+		//t.Log("storing", idx)
+		//t.Log(s.shards[idx].data)
+		//t.Log(buffer.Bytes())
+	}
+	//s.Snapshot(writers)
+	//for _, w := range writers {
+	//	require.NotNil(t, w)
+	//	//require.NotEqual(t, 0, len(w))
+	//}
+
+	readers := make([]*bytes.Buffer, numShards)
+	for idx := range readers {
+		buffer, ok := writers[idx].(*bytes.Buffer)
+		require.True(t, ok)
+		readers[idx] = buffer
+	}
+	//s2 := newShardedMapFromSnapshot(readers)
+
+	s2 := &shardedMap{
+		shards:    make([]*lockedMap, int(numShards)),
+		expiryMap: s.expiryMap,
+	}
+
+	var err error
+	for idx := range readers {
+		//t.Log("Reading", idx)
+		//var b []byte
+		//readers[idx].Read(b)
+		//t.Log(b)
+		//
+		//var lockedMapBuffer bytes.Buffer
+		//_, err := lockedMapBuffer.ReadFrom(readers[idx])
+		//require.Nil(t, err)
+		//
+		//t.Log("bytes", lockedMapBuffer.Bytes())
+		//lockedMap := UnmarshalLockedMap(lockedMapBuffer.Bytes())
+		//t.Log(lockedMap)
+
+		s2.shards[idx], err = newLockedMapFromSnapshot(s2.expiryMap, readers[idx].Bytes(), nil)
+		require.Nil(t, err)
+	}
+
+	for idx, m := range s2.shards {
+		//t.Log("Idx", idx)
+
+		for key, item := range m.data {
+			require.Equal(t, s.shards[idx].data[key].value, int(item.value.(int8)))
+			require.True(t, s.shards[idx].data[key].expiration.Equal(item.expiration))
+		}
+		require.Equal(t, len(s.shards[idx].data), len(m.data))
+		//require.Equal(t, s.shards[idx].data, m.data)
+	}
 }
 
 func TestStoreDel(t *testing.T) {

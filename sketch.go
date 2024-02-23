@@ -62,6 +62,28 @@ func newCmSketch(numCounters int64) *cmSketch {
 	return sketch
 }
 
+type cmSketchExport struct {
+	Rows [cmDepth]cmRow
+	Seed [cmDepth]uint64
+	Mask uint64
+}
+
+func NewCmSketchExport(sketch *cmSketch) *cmSketchExport {
+	return &cmSketchExport{
+		Rows: sketch.rows,
+		Seed: sketch.seed,
+		Mask: sketch.mask,
+	}
+}
+
+func (se *cmSketchExport) ToCmSketch() *cmSketch {
+	return &cmSketch{
+		rows: se.Rows,
+		seed: se.Seed,
+		mask: se.Mask,
+	}
+}
+
 // Increment increments the count(ers) for the specified key.
 func (s *cmSketch) Increment(hashed uint64) {
 	for i := range s.rows {

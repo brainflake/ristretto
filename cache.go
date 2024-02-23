@@ -23,12 +23,16 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
 
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/brainflake/ristretto/z"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 var (
@@ -206,6 +210,111 @@ func NewCache(config *Config) (*Cache, error) {
 	//       usually be sufficient
 	go cache.processItems()
 	return cache, nil
+}
+
+func NewCacheFromSnapshot(dir string, config *Config, itemType interface{}) (*Cache, error) {
+	var err error
+	var dirInfo os.FileInfo
+
+	// check that dir exists
+	if dirInfo, err = os.Stat(dir); os.IsNotExist(err) {
+		return nil, err
+	}
+	if !dirInfo.IsDir() {
+		return nil, errors.New("snapshot path is not a directory")
+	}
+
+	switch {
+	case config.BufferItems == 0:
+		return nil, errors.New("BufferItems can't be zero")
+	}
+
+	policy, err := newDefaultPolicyFromSnapshot(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	store, err := newStoreFromSnapshot(dir, itemType)
+	if err != nil {
+		return nil, err
+	}
+
+	cache := &Cache{
+		store:              store,
+		policy:             policy,
+		getBuf:             newRingBuffer(policy, config.BufferItems),
+		setBuf:             make(chan *Item, setBufSize),
+		keyToHash:          config.KeyToHash,
+		stop:               make(chan struct{}),
+		cost:               config.Cost,
+		ignoreInternalCost: config.IgnoreInternalCost,
+		cleanupTicker:      time.NewTicker(time.Duration(bucketDurationSecs) * time.Second / 2),
+	}
+	cache.onExit = func(val interface{}) {
+		if config.OnExit != nil && val != nil {
+			config.OnExit(val)
+		}
+	}
+	cache.onEvict = func(item *Item) {
+		if config.OnEvict != nil {
+			config.OnEvict(item)
+		}
+		cache.onExit(item.Value)
+	}
+	cache.onReject = func(item *Item) {
+		if config.OnReject != nil {
+			config.OnReject(item)
+		}
+		cache.onExit(item.Value)
+	}
+	if cache.keyToHash == nil {
+		cache.keyToHash = z.KeyToHash
+	}
+	if config.Metrics {
+		err = cache.collectMetricsFromSnapshot(dir)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// NOTE: benchmarks seem to show that performance decreases the more
+	//       goroutines we have running cache.processItems(), so 1 should
+	//       usually be sufficient
+	go cache.processItems()
+	return cache, nil
+}
+
+// Snapshot creates a snapshot of the state of the cache
+// Note: we do this with minimal locking for performance reasons. Namely
+// we do not attempt to form a proper point-in-time view of the LFU structures,
+// metrics and sharded map data, preferring a "best effort" export of the data and
+// allowing for some drift in the admission/eviction policy structures and metrics.
+func (c *Cache) Snapshot(dir string) error {
+	var err error
+	var dirInfo os.FileInfo
+
+	// check that dir exists and is writable
+	if dirInfo, err = os.Stat(dir); os.IsNotExist(err) {
+		return err
+	}
+	if !dirInfo.IsDir() {
+		return errors.New("snapshot path is not a directory")
+	}
+
+	// snapshot policy
+	err = c.policy.Snapshot(dir)
+	if err != nil {
+		return err
+	}
+
+	// snapshot cache metrics (if metrics are enabled)
+	if c.Metrics != nil {
+		err = c.Metrics.Snapshot(dir)
+		if err != nil {
+			return err
+		}
+	}
+
+	return c.store.Snapshot(dir)
 }
 
 // Wait blocks until all buffered writes have been applied. This ensures a call to Set()
@@ -504,6 +613,19 @@ func (c *Cache) collectMetrics() {
 	c.policy.CollectMetrics(c.Metrics)
 }
 
+func (c *Cache) collectMetricsFromSnapshot(dir string) error {
+	var err error
+
+	c.Metrics, err = newMetricsFromSnapshot(dir)
+	if err != nil {
+		return err
+	}
+
+	c.policy.CollectMetrics(c.Metrics)
+
+	return nil
+}
+
 type metricType int
 
 const (
@@ -577,6 +699,81 @@ func newMetrics() *Metrics {
 		}
 	}
 	return s
+}
+
+type MetricsExport struct {
+	All  [doNotUse][]*uint64
+	Life *z.HistogramData
+}
+
+func (p *Metrics) Snapshot(dir string) error {
+	var err error
+
+	metricsBuffer, err := z.NewBufferPersistent(filepath.Join(dir, metricsFilename), 0)
+	if err != nil {
+		return err
+	}
+	defer metricsBuffer.Release()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	err = p.MarshalToBuffer(metricsBuffer)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (p *Metrics) MarshalToBuffer(buffer io.Writer) error {
+	export := MetricsExport{
+		All:  p.all,
+		Life: p.life,
+	}
+
+	e := msgpack.NewEncoder(buffer)
+	return e.Encode(export)
+}
+
+func newMetricsFromSnapshot(dir string) (*Metrics, error) {
+	var err error
+
+	metricsFile := filepath.Join(dir, metricsFilename)
+	if _, err = os.Stat(metricsFile); os.IsNotExist(err) {
+		return nil, err
+	}
+
+	f, err := os.Open(metricsFile)
+	if err != nil {
+		return nil, err
+	}
+
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	buf, err := z.NewReadBuffer(f, int(stat.Size()))
+	if err != nil {
+		return nil, err
+	}
+
+	return UnmarshalMetrics(buf.Bytes())
+}
+
+func UnmarshalMetrics(b []byte) (*Metrics, error) {
+	exportedMetrics := &MetricsExport{}
+
+	err := msgpack.Unmarshal(b, exportedMetrics)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Metrics{
+		all:  exportedMetrics.All,
+		life: exportedMetrics.Life,
+	}, nil
 }
 
 func (p *Metrics) add(t metricType, hash, delta uint64) {

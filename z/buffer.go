@@ -88,6 +88,22 @@ func NewBufferPersistent(path string, capacity int) (*Buffer, error) {
 	return buffer, nil
 }
 
+func NewReadBuffer(f *os.File, capacity int) (*Buffer, error) {
+	mmapFile, err := OpenMmapFileUsing(f, capacity, false)
+	if err != nil && err != NewFile {
+		return nil, err
+	}
+	buf := &Buffer{
+		buf:      mmapFile.Data,
+		bufType:  UseMmap,
+		curSz:    len(mmapFile.Data),
+		mmapFile: mmapFile,
+		offset:   uint64(capacity),
+		padding:  8,
+	}
+	return buf, nil
+}
+
 func NewBufferTmp(dir string, capacity int) (*Buffer, error) {
 	if dir == "" {
 		dir = tmpDir

@@ -55,10 +55,11 @@ func TestM_JSON(t *testing.T) {
 		}
 	}
 
-	Json := bf.JSONMarshal()
+	Json, err := bf.MarshalJSON()
 
 	// create new bloomfilter from bloomfilter's JSON representation
-	bf2, err := JSONUnmarshal(Json)
+	bf2 := &Bloom{}
+	err = bf2.UnmarshalJSON(Json)
 	require.NoError(t, err)
 
 	cnt2 := 0
