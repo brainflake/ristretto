@@ -229,7 +229,7 @@ func NewCacheFromSnapshot(dir string, config *Config, itemType interface{}) (*Ca
 		return nil, errors.New("BufferItems can't be zero")
 	}
 
-	policy, err := newDefaultPolicyFromSnapshot(dir)
+	policy, err := newDefaultPolicyFromSnapshot(dir, config.MaxCost)
 	if err != nil {
 		return nil, err
 	}

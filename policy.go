@@ -76,7 +76,7 @@ func newPolicy(numCounters, maxCost int64) policy {
 	return newDefaultPolicy(numCounters, maxCost)
 }
 
-func newDefaultPolicyFromSnapshot(dir string) (policy, error) {
+func newDefaultPolicyFromSnapshot(dir string, maxCost int64) (policy, error) {
 	var err error
 
 	admissionPolicyFile := filepath.Join(dir, admissionLFUFilename)
@@ -94,7 +94,7 @@ func newDefaultPolicyFromSnapshot(dir string) (policy, error) {
 		return nil, err
 	}
 
-	evict, err := newSampledLFUFromSnapshot(evictionPolicyFile)
+	evict, err := newSampledLFUFromSnapshot(evictionPolicyFile, maxCost)
 	if err != nil {
 		return nil, err
 	}
@@ -380,7 +380,7 @@ func newSampledLFU(maxCost int64) *sampledLFU {
 	}
 }
 
-func newSampledLFUFromSnapshot(file string) (*sampledLFU, error) {
+func newSampledLFUFromSnapshot(file string, maxCost int64) (*sampledLFU, error) {
 	var err error
 
 	f, err := os.Open(file)
@@ -398,7 +398,15 @@ func newSampledLFUFromSnapshot(file string) (*sampledLFU, error) {
 		return nil, err
 	}
 
-	return UnmarshalSampledLFU(buf.Bytes())
+	unmarshaledSampledLFU, err := UnmarshalSampledLFU(buf.Bytes())
+	if err != nil {
+		return nil, err
+	}
+
+	// ensure maxCost is set from the config
+	unmarshaledSampledLFU.updateMaxCost(maxCost)
+
+	return unmarshaledSampledLFU, nil
 }
 
 func (p *sampledLFU) MarshalToBuffer(buffer io.Writer) error {
